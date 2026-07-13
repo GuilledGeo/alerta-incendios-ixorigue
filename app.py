@@ -27,8 +27,20 @@ except Exception:
 
 from src.config import (
     COLORS_RING, HOTSPOT_AGE_BINS_H, HOTSPOT_AGE_COLORS, RADIO_FALLBACK_M,
-    RANCHOS_DATA_SOURCE, RING_RISK, RING_THRESHOLDS_KM, WINDOW_HOURS_DEFAULT,
+    RANCHOS_DATA_SOURCE, RANCHOS_SNAPSHOT_PATH, RING_RISK, RING_THRESHOLDS_KM, WINDOW_HOURS_DEFAULT,
 )
+
+# el snapshot de ranchos (contiene datos de cliente) nunca va en este repo publico - si llega
+# como secret en base64 (RANCHOS_SNAPSHOT_B64), se escribe aqui en disco antes de leerlo. Es el
+# mecanismo pensado para Streamlit Community Cloud, que no tiene almacenamiento persistente
+# propio ni acceso a la BD de produccion - ver .streamlit/secrets.toml.example
+try:
+    if "RANCHOS_SNAPSHOT_B64" in st.secrets:
+        import base64
+        RANCHOS_SNAPSHOT_PATH.parent.mkdir(parents=True, exist_ok=True)
+        RANCHOS_SNAPSHOT_PATH.write_bytes(base64.b64decode(st.secrets["RANCHOS_SNAPSHOT_B64"]))
+except Exception:
+    pass
 from src.fires import calcular_avance, excluir_paises, formatear_duracion, geocodificar_incendios, identificar_incendios
 from src.gee_hotspots import obtener_hotspots_gee
 from src.ranches import obtener_ranchos_es

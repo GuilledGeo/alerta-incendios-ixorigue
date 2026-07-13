@@ -7,9 +7,9 @@ distancia, dirección, tendencia de avance del fuego y datos de contacto del cli
 
 **Esta es la versión de despliegue público** de la app — vive originalmente en el monorepo interno
 `ixo-geospacial` (`side_projects/alerta_incendios`). Aquí no hay ninguna credencial de base de
-datos ni acceso a la BD de producción: la lista de ranchos/clientes se lee de un **snapshot local**
-(`data/ranchos_snapshot.gpkg`, no incluido en el repo — ver más abajo), mientras que los **datos de
-incendio siguen siendo en tiempo real** vía Google Earth Engine.
+datos ni acceso a la BD de producción: la lista de ranchos/clientes se lee de un **snapshot**
+(generado aparte y pasado como secret, ver más abajo — nunca vive en el repo), mientras que los
+**datos de incendio siguen siendo en tiempo real** vía Google Earth Engine.
 
 ## Estructura
 
@@ -26,6 +26,25 @@ src/
 data/                            snapshot local de ranchos (.gpkg, gitignored)
 ```
 
+## Generar/refrescar el snapshot de ranchos
+
+Este repo no tiene acceso a la BD de producción a propósito. El snapshot se genera desde el
+monorepo interno `ixo-geospacial` (que sí tiene las credenciales) y viaja como secret en base64,
+nunca como archivo en el repo:
+
+```
+# desde ixo-geospacial/side_projects/alerta_incendios, con tu .env de BD configurado
+python scripts/exportar_snapshot.py
+
+# codificar el resultado en base64 (Windows)
+certutil -encode data/ranchos_snapshot.gpkg snapshot_b64.txt
+# (Linux/Mac: base64 -w0 data/ranchos_snapshot.gpkg > snapshot_b64.txt)
+```
+
+Pega el contenido de `snapshot_b64.txt` como `RANCHOS_SNAPSHOT_B64` en los Secrets (ver
+`.streamlit/secrets.toml.example`). Repite esto con la periodicidad que necesites (p. ej.
+semanal) — la cabecera de la app muestra la fecha de exportación del snapshot en uso.
+
 ## Cómo ejecutar en local
 
 ```
@@ -33,25 +52,15 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
-Necesitas dos cosas antes de arrancar:
-
-1. **El snapshot de ranchos** en `data/ranchos_snapshot.gpkg`. Este repo no tiene acceso a la BD
-   de producción a propósito — el snapshot se genera desde el monorepo interno `ixo-geospacial`
-   (`side_projects/alerta_incendios/scripts/exportar_snapshot.py`, que sí tiene las credenciales)
-   y se copia manualmente aquí. Refréscalo con la periodicidad que necesites (semanal, por
-   ejemplo) repitiendo ese proceso — la cabecera de la app muestra la fecha del snapshot en uso.
-
-2. **Credenciales de Google Earth Engine**: copia `.streamlit/secrets.toml.example` a
-   `.streamlit/secrets.toml` y rellena `GEE_SERVICE_ACCOUNT_EMAIL` / `GEE_SERVICE_ACCOUNT_KEY_JSON`
-   con una cuenta de servicio (rol "Earth Engine Resource Viewer"), y `RANCHOS_DATA_SOURCE = "snapshot"`.
+Copia `.streamlit/secrets.toml.example` a `.streamlit/secrets.toml` y rellena
+`RANCHOS_SNAPSHOT_B64` (ver arriba) y `GEE_SERVICE_ACCOUNT_EMAIL` / `GEE_SERVICE_ACCOUNT_KEY_JSON`
+(cuenta de servicio de Google Earth Engine, rol "Earth Engine Resource Viewer" — necesaria porque
+un servidor desplegado no puede hacer `earthengine authenticate` de forma interactiva).
 
 ## Despliegue en Streamlit Community Cloud
 
 1. Conecta este repo en [share.streamlit.io](https://share.streamlit.io), apuntando a `app.py`.
-2. Pega el contenido de `.streamlit/secrets.toml.example` (relleno) en el panel "Secrets" del
-   despliegue.
-3. Sube `data/ranchos_snapshot.gpkg` al entorno desplegado (no va en git) — o genera el snapshot
-   directamente ahí si en algún momento tiene acceso puntual a la BD.
+2. Pega el contenido de tu `secrets.toml` (relleno) en el panel "Secrets" del despliegue.
 
 ## Qué NO es esta app
 
