@@ -1,0 +1,612 @@
+import os
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import folium
+import geopandas as gpd
+import pandas as pd
+import streamlit as st
+from streamlit_folium import st_folium
+
+# puente secrets.toml -> variables de entorno, ANTES de importar src.config/src.ranches (que
+# leen esas variables al importarse). En local, sin .streamlit/secrets.toml, st.secrets lanza
+# StreamlitSecretNotFoundError con solo mirarlo (no hay archivo que parsear) - se ignora, las
+# credenciales personales (.env, `earthengine authenticate`) siguen funcionando igual.
+try:
+    for _clave in (
+        "GEE_SERVICE_ACCOUNT_EMAIL", "GEE_SERVICE_ACCOUNT_KEY_JSON",
+        "RANCHOS_DATA_SOURCE", "RANCHOS_SNAPSHOT_PATH",
+    ):
+        if _clave in st.secrets:
+            os.environ[_clave] = str(st.secrets[_clave])
+except Exception:
+    pass
+
+from src.config import (
+    COLORS_RING, HOTSPOT_AGE_BINS_H, HOTSPOT_AGE_COLORS, RADIO_FALLBACK_M,
+    RANCHOS_DATA_SOURCE, RING_RISK, RING_THRESHOLDS_KM, WINDOW_HOURS_DEFAULT,
+)
+from src.fires import calcular_avance, excluir_paises, formatear_duracion, geocodificar_incendios, identificar_incendios
+from src.gee_hotspots import obtener_hotspots_gee
+from src.ranches import obtener_ranchos_es
+from src.risk import evaluar_riesgo
+
+st.set_page_config(page_title="Alerta de incendios — Ixorigue", layout="wide", page_icon="🔥", initial_sidebar_state="collapsed")
+
+COLOR_FUENTE = {
+    "perimetro_dibujado": "#3b82f6",
+    "union_de_zonas": "#22c55e",
+    "circulo_aproximado": "#8b8f98",
+}
+DASH_FUENTE = {
+    "perimetro_dibujado": None,
+    "union_de_zonas": None,
+    "circulo_aproximado": "5,5",
+}
+RISK_BADGE = {
+    "3/3": ("#ef4444", "RIESGO MÁXIMO"),
+    "2/3": ("#f97316", "RIESGO ALTO"),
+    "1/3": ("#3b82f6", "VIGILANCIA"),
+}
+ORDEN_RIESGO = {"3/3": 0, "2/3": 1, "1/3": 2}
+
+# ============================== ESTILO ==============================
+
+MAP_HEIGHT = 640
+
+st.markdown(f"""
+<style>
+    #MainMenu, footer, header[data-testid="stHeader"] {{visibility: hidden; height: 0;}}
+    .block-container {{padding-top: 0.6rem; padding-bottom: 0.6rem; max-width: 1600px;}}
+    section[data-testid="stSidebar"] {{display: none;}}
+
+    .ix-hero {{
+        background: linear-gradient(120deg, #7c1d0f 0%, #b8380f 45%, #d9631a 100%);
+        border-radius: 12px;
+        padding: 12px 20px;
+        color: #fff;
+        box-shadow: 0 6px 18px rgba(184,56,15,0.25);
+        display: flex;
+        align-items: baseline;
+        gap: 14px;
+        flex-wrap: wrap;
+    }}
+    .ix-hero h1 {{margin: 0; font-size: 1.3rem; font-weight: 700; letter-spacing: -0.01em; white-space: nowrap;}}
+    .ix-hero p {{margin: 0; opacity: 0.9; font-size: 0.82rem;}}
+
+    .ix-toolbar {{
+        background-color: rgba(127,127,127,0.06);
+        border: 1px solid rgba(127,127,127,0.15);
+        border-radius: 10px;
+        padding: 8px 16px 0px 16px;
+        margin: 8px 0 8px 0;
+    }}
+    .ix-toolbar div[data-testid="stTextInput"] label,
+    .ix-toolbar div[data-testid="stMultiSelect"] label,
+    .ix-toolbar div[data-testid="stSlider"] label {{font-size: 0.72rem;}}
+
+    div[data-testid="stMetric"] {{
+        background-color: rgba(127,127,127,0.06);
+        border: 1px solid rgba(127,127,127,0.12);
+        border-radius: 8px;
+        padding: 6px 10px;
+    }}
+    div[data-testid="stMetric"] label {{font-size: 0.68rem; opacity: 0.75;}}
+    div[data-testid="stMetricValue"] {{font-size: 1.1rem;}}
+
+    .ix-section-title {{
+        font-size: 0.92rem;
+        font-weight: 700;
+        margin: 2px 0 6px 0;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+    }}
+
+    .ix-badge {{
+        display: inline-block;
+        padding: 2px 9px;
+        border-radius: 999px;
+        font-size: 0.68rem;
+        font-weight: 700;
+        color: #fff;
+        letter-spacing: 0.02em;
+    }}
+
+    div[data-testid="stExpander"] {{
+        border: 1px solid rgba(127,127,127,0.15);
+        border-radius: 8px;
+    }}
+    div[data-testid="stExpander"] summary {{font-size: 0.85rem; padding: 6px 10px;}}
+
+    .ix-legend {{opacity: 0.7; font-size: 0.74rem; margin-bottom: 4px;}}
+
+    /* paneles con scroll interno, para que la pagina entera no haga scroll */
+    div[data-testid="stVerticalBlockBorderWrapper"] > div > div[data-testid="stVerticalBlock"] {{
+        gap: 0.4rem;
+    }}
+</style>
+""", unsafe_allow_html=True)
+
+
+@st.cache_data(ttl=1800, show_spinner="Cargando ranchos de clientes desde BD...")
+def _cargar_ranchos():
+    return obtener_ranchos_es()
+
+
+@st.cache_data(ttl=900, show_spinner="Consultando hotspots en Google Earth Engine...")
+def _cargar_hotspots(bbox, window_hours):
+    return obtener_hotspots_gee(bbox, window_hours), datetime.now(timezone.utc)
+
+
+@st.cache_data(ttl=900, show_spinner="Agrupando y geolocalizando incendios (Nominatim)...")
+def _procesar_incendios(hotspots):
+    hotspots_enriquecido, incendios = identificar_incendios(hotspots)
+    incendios = geocodificar_incendios(incendios)
+    # fuera de interes: incendios reales de paises vecinos (Marruecos, Argelia, Portugal...)
+    # captados por el margen +20km del bbox de consulta
+    hotspots_enriquecido, incendios = excluir_paises(hotspots_enriquecido, incendios)
+
+    avance = calcular_avance(hotspots_enriquecido)
+    incendios = incendios.merge(avance, on="fire_id", how="left")
+
+    hotspots_enriquecido = hotspots_enriquecido.merge(
+        incendios[["fire_id", "localidad", "municipio", "provincia", "primera_deteccion",
+                   "ultima_deteccion", "duracion_horas", "n_detecciones",
+                   "direccion_avance_es", "velocidad_kmh", "avance_confiable"]],
+        on="fire_id", how="left",
+    )
+    return hotspots_enriquecido, incendios
+
+
+def _bbox_de_ranchos(ranchos) -> tuple[float, float, float, float]:
+    b = ranchos.total_bounds  # (minx, miny, maxx, maxy)
+    margen = 0.2  # grados, ~20 km, para no perder hotspots justo en el borde
+    return (b[0] - margen, b[1] - margen, b[2] + margen, b[3] + margen)
+
+
+def _filtrar_ranchos(df, texto, regiones):
+    if texto:
+        t = texto.strip().lower()
+        df = df[df["ranch_name"].str.lower().str.contains(t, na=False)
+                | df["customer_name"].str.lower().str.contains(t, na=False)]
+    if regiones:
+        df = df[df["region"].isin(regiones)]
+    return df
+
+
+def _badge_html(risk_level: str) -> str:
+    color, label = RISK_BADGE.get(risk_level, ("#6b7280", risk_level))
+    return f'<span class="ix-badge" style="background-color:{color}">{label} · {risk_level}</span>'
+
+
+def _color_por_antiguedad(acq_datetime) -> tuple[str, str]:
+    """Color del hotspot segun horas transcurridas desde su deteccion (label, color hex) -
+    morado = recien detectado, va virando a rojo/naranja/amarillo/gris cuanto mas antiguo."""
+    horas = (pd.Timestamp.now(tz="UTC") - acq_datetime).total_seconds() / 3600.0
+    for i, umbral in enumerate(HOTSPOT_AGE_BINS_H):
+        if horas <= umbral:
+            label = f"≤{umbral}h" if i == 0 else f"{HOTSPOT_AGE_BINS_H[i - 1]}-{umbral}h"
+            return label, HOTSPOT_AGE_COLORS[label]
+    label = f">{HOTSPOT_AGE_BINS_H[-1]}h"
+    return label, HOTSPOT_AGE_COLORS[label]
+
+
+def _tooltip_zona(row) -> str:
+    zona_nombre = row.get("zona_nombre")
+    base = f"{row['ranch_name']} ({row['customer_name']})"
+    return f"{base} · Zona: {zona_nombre}" if zona_nombre else base
+
+
+def _mapa_principal(ranchos_df, hotspots_df, resaltar_ids=None, centro=None, zoom=6):
+    resaltar_ids = resaltar_ids or set()
+    m = folium.Map(location=centro, zoom_start=zoom, tiles="CartoDB positron")
+    folium.TileLayer("Esri.WorldImagery", name="Satélite").add_to(m)
+
+    for _, row in ranchos_df.iterrows():
+        resaltado = row["ranch_id"] in resaltar_ids
+        color = COLOR_FUENTE[row["fuente_geometria"]]
+        dash = DASH_FUENTE[row["fuente_geometria"]]
+        style = {
+            "color": "#ffd166" if resaltado else color,
+            "weight": 4 if resaltado else 1.5,
+            "fillOpacity": 0.35 if resaltado else 0.12,
+        }
+        if dash and not resaltado:
+            style["dashArray"] = dash
+        folium.GeoJson(
+            row["geometry"].__geo_interface__,
+            style_function=lambda _f, style=style: style,
+            tooltip=f"{_tooltip_zona(row)} · {row['tipo_ganaderia']}",
+        ).add_to(m)
+
+    if hotspots_df is not None and not hotspots_df.empty:
+        for _, hs in hotspots_df.iterrows():
+            lugar = ", ".join(p for p in [hs.get("localidad"), hs.get("provincia")] if p)
+            edad_label, edad_color = _color_por_antiguedad(hs["acq_datetime"])
+            folium.CircleMarker(
+                location=[hs["latitude"], hs["longitude"]],
+                radius=5, color=edad_color, fill=True, fill_color=edad_color, fill_opacity=0.85,
+                tooltip=f"Hotspot {hs['source']} · {edad_label}" + (f" · {lugar}" if lugar else "")
+                        + f" · {hs['acq_datetime']:%Y-%m-%d %H:%M} UTC",
+            ).add_to(m)
+
+    folium.LayerControl().add_to(m)
+    return m
+
+
+ANILLOS_LABELS = ["0-3 km", "3-5 km", "5-10 km"]  # deben coincidir en orden con RING_THRESHOLDS_KM
+
+
+def _anillos_riesgo(rancho_geom):
+    """Buffers del perimetro del rancho a 3/5/10 km (zonas de seguridad), en el mismo sistema de
+    distancias que usa evaluar_riesgo() (distancia al perimetro, no al centroide)."""
+    base_m = gpd.GeoSeries([rancho_geom], crs="EPSG:4326").to_crs("EPSG:3857")
+    return [
+        (label, base_m.buffer(km * 1000).to_crs("EPSG:4326").iloc[0])
+        for km, label in zip(RING_THRESHOLDS_KM, ANILLOS_LABELS)
+    ]
+
+
+def _mapa_mini_aviso(rancho_row, aviso_row, hotspots_cercanos):
+    """Mapa individual de un aviso: perimetro del rancho, anillos de riesgo (zonas de seguridad),
+    hotspot(s) cercanos, y linea de distancia entre el centroide del rancho y el hotspot que
+    disparo el aviso."""
+    centroid = rancho_row["geometry"].centroid
+    m = folium.Map(location=[centroid.y, centroid.x], zoom_start=11, tiles="Esri.WorldImagery")
+
+    # anillos de mayor a menor radio, para que el mas pequeño quede encima visualmente
+    for label, anillo_geom in reversed(_anillos_riesgo(rancho_row["geometry"])):
+        folium.GeoJson(
+            anillo_geom.__geo_interface__,
+            style_function=lambda _f, color=COLORS_RING[label]: {
+                "color": color, "weight": 1.5, "fillColor": color, "fillOpacity": 0.08, "dashArray": "4,4",
+            },
+            tooltip=f"Zona {label} · riesgo {RING_RISK[label]}",
+        ).add_to(m)
+
+    folium.GeoJson(
+        rancho_row["geometry"].__geo_interface__,
+        style_function=lambda _f: {"color": "#ffd166", "weight": 3, "fillOpacity": 0.15},
+        tooltip=_tooltip_zona(rancho_row),
+    ).add_to(m)
+
+    for _, hs in hotspots_cercanos.iterrows():
+        edad_label, edad_color = _color_por_antiguedad(hs["acq_datetime"])
+        folium.CircleMarker(
+            location=[hs["latitude"], hs["longitude"]],
+            radius=6, color=edad_color, fill=True, fill_color=edad_color, fill_opacity=0.9,
+            tooltip=f"{hs['source']} · {edad_label} · {hs['acq_datetime']:%Y-%m-%d %H:%M} UTC",
+        ).add_to(m)
+
+    folium.PolyLine(
+        locations=[[centroid.y, centroid.x], [aviso_row["hotspot_lat"], aviso_row["hotspot_lon"]]],
+        color="#ffd166", weight=2, dash_array="6,6",
+        tooltip=f"{aviso_row['distance_km']:.1f} km",
+    ).add_to(m)
+
+    # encuadre que cubra la mayor zona de seguridad (10 km) ademas del hotspot, para que se
+    # vean los anillos completos y no solo el segmento centroide-hotspot
+    minx, miny, maxx, maxy = _anillos_riesgo(rancho_row["geometry"])[-1][1].bounds
+    bounds = [[miny, minx], [maxy, maxx], [aviso_row["hotspot_lat"], aviso_row["hotspot_lon"]]]
+    m.fit_bounds(bounds, padding=(20, 20))
+    return m
+
+
+# ============================== ESQUELETO DE LA PAGINA (orden visual) ==============================
+# todo cabe en una sola pantalla: cabecera y filtros compactos arriba, debajo KPIs en una fila,
+# y el bloque principal en dos columnas (mapa grande | panel con pestañas) de la misma altura,
+# con scroll interno en el panel en vez de scroll de pagina.
+
+ph_header = st.container()
+ph_toolbar = st.container()
+ph_kpis = st.container()
+col_mapa, col_panel = st.columns([1, 1.15])
+
+# ============================== CABECERA ==============================
+
+with ph_header:
+    col_titulo, col_info = st.columns([6, 1])
+    with col_titulo:
+        st.markdown("""
+        <div class="ix-hero">
+            <h1>🔥 Panel de riesgo de incendio</h1>
+            <p>Ixorigue — cruce automático de ranchos de clientes ES contra hotspots de incendio en tiempo casi real</p>
+        </div>
+        """, unsafe_allow_html=True)
+    with col_info:
+        with st.popover("ℹ️ Cómo funciona", width="stretch"):
+            st.markdown(f"""
+**Ranchos y su geometría** — cada finca se dibuja con el mejor dato disponible, en este orden:
+1. 🔵 **Perímetro real**: el límite que el cliente dibujó en la app (`Zones` marcada como perímetro).
+2. 🟢 **Unión de zonas**: si no hay perímetro, se unen todas las parcelas de pasto activas del rancho.
+3. ⚪ **Círculo aproximado** (línea discontinua): si no hay ninguna zona dibujada, un círculo de
+   {RADIO_FALLBACK_M} m sobre la ubicación del rancho — solo orientativo, no representa el límite real.
+
+**Detección de incendios** — se consultan puntos calientes (hotspots) de los satélites VIIRS
+(NOAA-20/SNPP) y FIRMS vía Google Earth Engine, dentro de una ventana fija de {WINDOW_HOURS_DEFAULT}h
+hacia atrás (ampliarla más solo añade hotspots ya extinguidos, ver aviso más abajo). Los hotspots
+cercanos en espacio y tiempo se agrupan en "incendios" para no repetir el mismo fuego muchas veces.
+Se descartan los incendios geocodificados fuera de España (el margen de +20 km del área de
+consulta capta a veces incendios reales de Marruecos, Argelia, Portugal o Francia).
+
+Cada punto del mapa se colorea según su antigüedad (morado = recién detectado, virando a rojo,
+naranja, amarillo, verde oliva y finalmente gris — probablemente ya extinguido — cuanto más
+antigua es la detección dentro de la ventana consultada).
+
+**⚠️ No es monitorización continua** — estos satélites son de órbita polar y solo sobrevuelan cada
+punto de España unas pocas veces al día:
+- VIIRS NOAA-20 y VIIRS SNPP: ~2 pasadas/día cada uno (una diurna, una nocturna).
+- FIRMS: agrega además detecciones de MODIS (Terra/Aqua), con nuevas imágenes cada ~3h de latencia.
+
+En total, un rancho puede recibir como mucho **6-8 actualizaciones de datos al día**, repartidas de
+forma irregular. Además, como FIRMS ya incluye detecciones de VIIRS internamente, un mismo foco
+real puede aparecer duplicado con `source` distinto.
+
+**Nivel de riesgo por rancho** — para cada hotspot se calcula la distancia al perímetro del rancho
+más cercano y se asigna un anillo:
+- **Dentro del rancho o a ≤3 km** → riesgo `{RING_RISK["0-3 km"]}` (máximo)
+- **3–5 km** → riesgo `{RING_RISK["3-5 km"]}` (alto)
+- **5–10 km** → riesgo `{RING_RISK["5-10 km"]}` (vigilancia)
+- **Más de 10 km** → sin aviso
+
+En el mapa de cada aviso (pestaña "🏆 Ranking de riesgo") se dibujan estos tres anillos como zonas
+de seguridad alrededor del perímetro real del rancho, para visualizar de un vistazo cuánto margen
+queda hasta el siguiente nivel de riesgo.
+
+**Tendencia de avance del incendio** — cuando hay suficientes detecciones repartidas en el tiempo
+(≥3 hotspots, ≥1h de ventana, con movimiento neto por encima del ruido de localización del sensor),
+se estima una dirección y velocidad aproximadas comparando el centroide de las primeras detecciones
+con el de las últimas. Es una aproximación orientativa a partir de datos satelitales, **no** un
+modelo real de propagación de incendios (no tiene en cuenta viento, combustible ni pendiente).
+
+Un rancho solo genera un aviso por el hotspot más grave. La **dirección** es el rumbo
+(N/NE/E/SE/S/SO/O/NO) desde el centroide del rancho hacia el hotspot (bearing great-circle).
+""")
+
+# ============================== BARRA DE FILTROS (se calcula antes del mapa) ==============================
+
+ranchos = _cargar_ranchos()
+bbox = _bbox_de_ranchos(ranchos)
+
+OPCION_SIN_GANADERIA = "(todas las ganaderías)"
+
+with ph_toolbar:
+    st.markdown('<div class="ix-toolbar">', unsafe_allow_html=True)
+    c_busq, c_region, c_niveles, c_recargar = st.columns([2, 2, 1.8, 1])
+    with c_busq:
+        opciones_ganaderia = [OPCION_SIN_GANADERIA] + sorted(ranchos["ranch_name"].dropna().unique())
+        ganaderia_sel = st.selectbox("Buscar ganadería", options=opciones_ganaderia, index=0)
+        busqueda = "" if ganaderia_sel == OPCION_SIN_GANADERIA else ganaderia_sel
+    with c_region:
+        regiones_sel = st.multiselect("Comunidad autónoma", options=sorted(ranchos["region"].dropna().unique()))
+    with c_niveles:
+        niveles = st.multiselect("Nivel de riesgo", options=["3/3", "2/3", "1/3"], default=["3/3", "2/3", "1/3"])
+    with c_recargar:
+        st.write("")
+        if st.button("↻ Recargar hotspots", width="stretch"):
+            _cargar_hotspots.clear()
+            _procesar_incendios.clear()
+    st.markdown('</div>', unsafe_allow_html=True)
+
+window_hours = WINDOW_HOURS_DEFAULT  # fijo: cuanto mas atras se mire, mas hotspots "fantasma" ya extinguidos aparecen
+ranchos_filtrados = _filtrar_ranchos(ranchos, busqueda, regiones_sel)
+hay_filtro = bool(busqueda or regiones_sel)
+
+# ============================== CARGA DE DATOS (incendios/avisos) ==============================
+
+try:
+    hotspots_crudos, fetched_at = _cargar_hotspots(bbox, window_hours)
+    hotspots, incendios = _procesar_incendios(hotspots_crudos)
+    error_gee = None
+except Exception as e:
+    hotspots, incendios, fetched_at = None, None, None
+    error_gee = str(e)
+
+avisos = evaluar_riesgo(ranchos, hotspots) if hotspots is not None and not hotspots.empty else None
+avisos_filtrados = avisos
+if avisos is not None:
+    ids_filtrados = set(ranchos_filtrados["ranch_id"])
+    avisos_filtrados = avisos[avisos["ranch_id"].isin(ids_filtrados)]
+    avisos_filtrados = avisos_filtrados[avisos_filtrados["risk_level"].isin(niveles)]
+
+# ============================== MAPA (columna izquierda, mitad de la ventana) ==============================
+
+if "foco_ranch_id" not in st.session_state:
+    st.session_state["foco_ranch_id"] = None
+
+with col_mapa:
+    foco_id = st.session_state["foco_ranch_id"]
+
+    col_titulo_mapa, col_quitar_foco = st.columns([5, 1.3])
+    with col_titulo_mapa:
+        subtitulo = f"🗺️ Mapa de ranchos — {len(ranchos_filtrados)} / {len(ranchos)}"
+        if hay_filtro:
+            subtitulo += "  ·  filtrado"
+        if foco_id is not None:
+            subtitulo += "  ·  🎯 zona seleccionada"
+        st.markdown(f'<div class="ix-section-title">{subtitulo}</div>', unsafe_allow_html=True)
+    with col_quitar_foco:
+        if foco_id is not None and st.button("✖ Quitar foco", width="stretch"):
+            st.session_state["foco_ranch_id"] = None
+            st.rerun()
+
+    leyenda_hotspots = " &nbsp;·&nbsp; ".join(
+        f'<span style="color:{color}">●</span> {label}' for label, color in HOTSPOT_AGE_COLORS.items()
+    )
+    st.markdown(
+        '<p class="ix-legend">🔵 Perímetro real &nbsp;·&nbsp; 🟢 Unión de zonas &nbsp;·&nbsp; '
+        '⚪ Círculo aproximado (discontinuo) &nbsp;·&nbsp; 🟡 Coincide con el filtro/foco &nbsp;·&nbsp; '
+        f'Hotspots por antigüedad: {leyenda_hotspots}</p>',
+        unsafe_allow_html=True,
+    )
+    if error_gee:
+        st.error(f"No se pudo consultar Google Earth Engine: {error_gee}")
+
+    if foco_id is not None and foco_id in set(ranchos["ranch_id"]):
+        rancho_foco = ranchos.loc[ranchos["ranch_id"] == foco_id].iloc[0]
+        centro = [rancho_foco["lat"], rancho_foco["lon"]]
+        zoom = 13
+        resaltar = {foco_id}
+        m = _mapa_principal(ranchos, hotspots, resaltar_ids=resaltar, centro=centro, zoom=zoom)
+        st_folium(m, width=None, height=MAP_HEIGHT, returned_objects=[], key="mapa_general")
+    elif ranchos_filtrados.empty:
+        st.warning("Ningún rancho coincide con los filtros.")
+    else:
+        centro = [ranchos_filtrados["lat"].mean(), ranchos_filtrados["lon"].mean()]
+        zoom = 6 if not hay_filtro else 9
+        resaltar = set(ranchos_filtrados["ranch_id"]) if hay_filtro else None
+        m = _mapa_principal(ranchos, hotspots, resaltar_ids=resaltar, centro=centro, zoom=zoom)
+        if hay_filtro:
+            # encuadre exacto a la(s) zona(s) que coinciden con el filtro (busqueda, tipo o
+            # region), esten o no en el ranking de riesgo - el zoom fijo de arriba es solo
+            # el punto de partida antes de ajustar a los limites reales de la geometria
+            minx, miny, maxx, maxy = ranchos_filtrados.total_bounds
+            m.fit_bounds([[miny, minx], [maxy, maxx]], padding=(30, 30))
+        st_folium(m, width=None, height=MAP_HEIGHT, returned_objects=[], key="mapa_general")
+
+# ============================== KPIs ==============================
+
+n_clientes = ranchos["customer_name"].nunique()
+n_riesgo_max = int((avisos["risk_level"] == "3/3").sum()) if avisos is not None else 0
+n_riesgo_alto = int((avisos["risk_level"] == "2/3").sum()) if avisos is not None else 0
+n_riesgo_vig = int((avisos["risk_level"] == "1/3").sum()) if avisos is not None else 0
+n_incendios = len(incendios) if incendios is not None else 0
+pct_geom_real = (ranchos["fuente_geometria"] != "circulo_aproximado").mean() * 100
+
+with ph_kpis:
+    if RANCHOS_DATA_SOURCE == "snapshot" and "snapshot_exportado_en" in ranchos.columns:
+        exportado_en = pd.to_datetime(ranchos["snapshot_exportado_en"].iloc[0]).tz_convert("Europe/Madrid")
+        st.caption(f"🗂️ Ranchos/clientes: snapshot local del {exportado_en:%Y-%m-%d %H:%M} · los datos de incendio siguen en tiempo real.")
+    if fetched_at:
+        edad_min = int((datetime.now(timezone.utc) - fetched_at).total_seconds() / 60)
+        st.caption(f"🛰️ Última consulta a GEE: hace {edad_min} min · ventana de {window_hours}h · {n_clientes} clientes activos, {len(ranchos)} ranchos activos.")
+
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("Clientes activos", n_clientes)
+    k2.metric("Ranchos activos", len(ranchos))
+    k3.metric("Geometría real", f"{pct_geom_real:.0f}%", help="% de ranchos con perímetro real o unión de zonas, no círculo aproximado")
+    k4.metric("🔥 Incendios en España", n_incendios)
+
+    k5, k6, k7, k8 = st.columns(4)
+    k5.metric("Hotspots", len(hotspots) if hotspots is not None else 0)
+    k6.metric("🔴 Riesgo máximo", n_riesgo_max)
+    k7.metric("🟠 Riesgo alto", n_riesgo_alto)
+    k8.metric("🔵 Vigilancia", n_riesgo_vig)
+
+# ============================== PANEL DERECHO CON PESTAÑAS (misma altura que el mapa) ==============================
+
+PANEL_HEIGHT = MAP_HEIGHT - 42  # descuenta la fila de pestañas
+
+with col_panel:
+    tab_ranking, tab_lista = st.tabs(["🏆 Ranking de riesgo", "📋 Lista de ganaderías"])
+
+    # ---- RANKING DE GANADERIAS EN RIESGO ----
+    with tab_ranking:
+        with st.container(height=PANEL_HEIGHT, border=False):
+            if error_gee:
+                st.info("Sin datos de GEE — no se puede calcular el ranking.")
+            elif hotspots is None or hotspots.empty:
+                st.success(f"Sin hotspots en los últimos {window_hours}h.")
+            elif avisos is None or avisos.empty:
+                st.success(f"{len(hotspots)} hotspots detectados, ninguno a menos de 10 km de un rancho.")
+            elif avisos_filtrados.empty:
+                st.info("Ningún aviso coincide con los filtros actuales.")
+            else:
+                ranking = avisos_filtrados.copy()
+                ranking["_orden"] = ranking["risk_level"].map(ORDEN_RIESGO)
+                ranking = ranking.sort_values(["_orden", "distance_km"]).reset_index(drop=True)
+                st.caption(f"{len(ranking)} / {len(avisos)} ganaderías con foco a menos de 10 km, ordenadas de más a menos grave.")
+
+                for i, aviso in ranking.iterrows():
+                    telefono = aviso.get("customer_phone")
+                    etiqueta = f"#{i + 1} · {aviso['risk_level']} · {aviso['ranch_name']} — {aviso['customer_name']}"
+                    titulo = (
+                        f'{_badge_html(aviso["risk_level"])} &nbsp; <b>{aviso["ranch_name"]}</b> '
+                        f'&nbsp;·&nbsp; {aviso["customer_name"]}'
+                        + (f" &nbsp;·&nbsp; 📞 {telefono}" if pd.notna(telefono) and telefono else "")
+                    )
+                    with st.expander(etiqueta, expanded=(i == 0)):
+                        col_titulo_aviso, col_boton_foco = st.columns([4, 1.4])
+                        with col_titulo_aviso:
+                            st.markdown(titulo, unsafe_allow_html=True)
+                        with col_boton_foco:
+                            if st.button("🎯 Ver en mapa", key=f"foco_btn_{aviso['ranch_id']}", width="stretch"):
+                                st.session_state["foco_ranch_id"] = aviso["ranch_id"]
+                                st.rerun()
+                        st.write("")
+                        c1, c2, c3, c4, c5 = st.columns(5)
+                        c1.metric("Distancia", f"{aviso['distance_km']:.1f} km")
+                        c2.metric("Anillo", aviso["ring"])
+                        c3.metric("Dirección", aviso["direction_es"].capitalize())
+                        duracion_h = aviso.get("duracion_horas")
+                        c4.metric("Activo hace", formatear_duracion(duracion_h) if pd.notna(duracion_h) else "—")
+                        ultima_det = aviso.get("ultima_deteccion")
+                        c5.metric(
+                            "Última act.",
+                            ultima_det.tz_convert("Europe/Madrid").strftime("%d/%m %H:%M") if pd.notna(ultima_det) else "—",
+                            help="Hora local de la detección satelital más reciente de este incendio.",
+                        )
+
+                        if aviso.get("avance_confiable"):
+                            st.markdown(
+                                f"🧭 **Tendencia de avance estimada:** hacia el {aviso['direccion_avance_es']} "
+                                f"&nbsp;·&nbsp; ~{aviso['velocidad_kmh']:.1f} km/h "
+                                f"(orientativa, a partir de las detecciones satelitales — no un modelo de propagación real)"
+                            )
+                        else:
+                            st.caption("🧭 Datos insuficientes para estimar la tendencia de avance de este incendio.")
+
+                        st.markdown(
+                            f"🗂️ **Zona:** {aviso.get('zona_nombre') or '—'} &nbsp;·&nbsp; "
+                            f"🐄 **Tipo de ganadería:** {aviso.get('tipo_ganaderia') or '—'} &nbsp;·&nbsp; "
+                            f"🗺️ **Región:** {aviso.get('region') or '—'} &nbsp;·&nbsp; "
+                            f"📍 **Localización del foco:** {aviso.get('lugar') or 'sin resolver'}"
+                        )
+                        st.info(aviso["mensaje_final"])
+                        st.caption(f"Foco que dispara este aviso: {aviso['source']} · {aviso['acq_datetime']:%Y-%m-%d %H:%M} UTC")
+
+                        rancho_row = ranchos.loc[ranchos["ranch_id"] == aviso["ranch_id"]].iloc[0]
+                        # ojo: filtrar por Ranches.Location (rancho_row["lat"]/["lon"]) es un bug si
+                        # la geometria real (union de varias Zones, a veces dispersas) queda lejos de
+                        # ese punto guardado - se usa en su lugar el propio bbox del anillo de 10km
+                        # (el mismo que se dibuja), que por construccion siempre contiene cualquier
+                        # hotspot a <=10km del poligono, incluido el que dispara el aviso
+                        minx, miny, maxx, maxy = _anillos_riesgo(rancho_row["geometry"])[-1][1].bounds
+                        hs_cercanos = hotspots[
+                            hotspots["longitude"].between(minx, maxx) & hotspots["latitude"].between(miny, maxy)
+                        ]
+                        m_mini = _mapa_mini_aviso(rancho_row, aviso, hs_cercanos)
+                        st_folium(m_mini, width=None, height=260, returned_objects=[], key=f"mapa_ranking_{aviso['ranch_id']}")
+
+    # ---- LISTA DE GANADERIAS EN RIESGO (mismas que el ranking) ----
+    with tab_lista:
+        with st.container(height=PANEL_HEIGHT, border=False):
+            if avisos_filtrados is None or avisos_filtrados.empty:
+                st.info("Ninguna ganadería con foco activo dentro de los filtros actuales.")
+            else:
+                st.caption("Mismas ganaderías que el ranking de riesgo. Encabezados de columna: clic para ordenar.")
+
+                columnas_lista = ["ranch_name", "customer_name", "customer_phone", "zona_nombre",
+                                   "tipo_ganaderia", "region", "distance_km", "direction_es",
+                                   "risk_level", "ring", "lugar", "acq_datetime"]
+                tabla_lista = avisos_filtrados[columnas_lista].rename(columns={
+                    "ranch_name": "Ganadería", "customer_name": "Cliente", "customer_phone": "Teléfono",
+                    "zona_nombre": "Zona", "tipo_ganaderia": "Tipo", "region": "Región",
+                    "distance_km": "Distancia (km)", "direction_es": "Dirección", "risk_level": "Riesgo",
+                    "ring": "Anillo", "lugar": "Localización del foco", "acq_datetime": "Detección (UTC)",
+                })
+                tabla_lista["_orden"] = tabla_lista["Riesgo"].map(ORDEN_RIESGO)
+                tabla_lista = tabla_lista.sort_values(["_orden", "Distancia (km)"]).drop(columns="_orden")
+
+                st.dataframe(tabla_lista, width="stretch", height=PANEL_HEIGHT - 90)
+
+                st.download_button(
+                    "⬇ Descargar (CSV)",
+                    data=tabla_lista.to_csv(index=False).encode("utf-8-sig"),
+                    file_name=f"avisos_incendios_{datetime.now(timezone.utc):%Y%m%d_%H%M}.csv",
+                    mime="text/csv",
+                )
