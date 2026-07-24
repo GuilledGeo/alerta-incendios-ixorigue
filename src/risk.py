@@ -8,6 +8,17 @@ from .geo_utils import bearing_deg, bearing_to_cardinal
 
 CRS_METRICO = "EPSG:3857"  # suficiente para distancias cortas (<50 km) sin distorsion relevante
 
+# columnas del DataFrame de avisos, usadas tambien para el caso "sin avisos": un pd.DataFrame()
+# a secas no tiene columnas, y el codigo llamante (app.py) siempre indexa por nombre de columna
+# (avisos["ranch_id"], avisos["risk_level"]...) incluso cuando no hay ninguna fila
+COLUMNAS_AVISOS = [
+    "ranch_id", "ranch_name", "customer_name", "customer_phone", "region", "tipo_ganaderia",
+    "zona_nombre", "distance_km", "ring", "risk_level", "direction", "direction_es",
+    "hotspot_lat", "hotspot_lon", "acq_datetime", "source", "fire_id", "localidad", "municipio",
+    "provincia", "lugar", "duracion_horas", "n_detecciones_incendio", "ultima_deteccion",
+    "direccion_avance_es", "velocidad_kmh", "avance_confiable", "mensaje_final",
+]
+
 
 def _ring_label(dist_km: float, dentro: bool) -> str:
     if dentro:
@@ -26,7 +37,7 @@ def evaluar_riesgo(ranchos: gpd.GeoDataFrame, hotspots: pd.DataFrame) -> pd.Data
     cardinal desde el centroide del rancho, anillo, nivel de riesgo y mensaje de aviso -
     mismo modelo que enriched.map(...) del script GEE original."""
     if hotspots.empty or ranchos.empty:
-        return pd.DataFrame()
+        return pd.DataFrame(columns=COLUMNAS_AVISOS)
 
     ranchos_m = ranchos.to_crs(CRS_METRICO)
     hotspots = hotspots.reset_index(drop=True)
@@ -146,7 +157,7 @@ def evaluar_riesgo(ranchos: gpd.GeoDataFrame, hotspots: pd.DataFrame) -> pd.Data
         })
 
     if not filas:
-        return pd.DataFrame()
+        return pd.DataFrame(columns=COLUMNAS_AVISOS)
 
     df = pd.DataFrame(filas)
     # un aviso por (rancho, hotspot mas cercano en el tiempo mas reciente) - evita duplicar
