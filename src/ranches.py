@@ -115,8 +115,18 @@ def obtener_ranchos_es() -> gpd.GeoDataFrame:
     Los datos de incendio (Google Earth Engine) son en tiempo real en ambos casos - solo la lista
     de ranchos/clientes queda fija a la fecha del ultimo snapshot."""
     if RANCHOS_DATA_SOURCE == "snapshot":
-        return _obtener_ranchos_snapshot()
-    return _obtener_ranchos_db()
+        df = _obtener_ranchos_snapshot()
+    else:
+        df = _obtener_ranchos_db()
+
+    # salvaguarda para snapshots generados antes de excluir "circulo_aproximado" (o con la
+    # exportacion desactualizada): _obtener_ranchos_db() ya filtra estos ranchos, pero un
+    # snapshot .gpkg es un volcado estatico que puede llevar tiempo sin regenerarse - sin este
+    # filtro aqui, COLOR_FUENTE/DASH_FUENTE en app.py lanzan KeyError al no reconocer ese valor
+    if "fuente_geometria" in df.columns:
+        df = df[df["fuente_geometria"] != "circulo_aproximado"].copy()
+
+    return df
 
 
 def _obtener_ranchos_snapshot() -> gpd.GeoDataFrame:
