@@ -2,7 +2,7 @@ import geopandas as gpd
 import pandas as pd
 from shapely.geometry import Point
 
-from .config import CARDINAL_ES, RING_RISK
+from .config import CARDINAL_ES, RING_RISK, RING_THRESHOLDS_KM
 from .fires import formatear_duracion
 from .geo_utils import bearing_deg, bearing_to_cardinal
 
@@ -29,104 +29,121 @@ def evaluar_riesgo(ranchos: gpd.GeoDataFrame, hotspots: pd.DataFrame) -> pd.Data
         return pd.DataFrame()
 
     ranchos_m = ranchos.to_crs(CRS_METRICO)
+    hotspots = hotspots.reset_index(drop=True)
     hotspots_geom = gpd.GeoSeries(
         [Point(lon, lat) for lon, lat in zip(hotspots["longitude"], hotspots["latitude"])],
         crs="EPSG:4326",
-    ).to_crs(CRS_METRICO)
+    ).to_crs(CRS_METRICO).reset_index(drop=True)
+
+    radio_max_m = RING_THRESHOLDS_KM[-1] * 1000
+
+    # candidate set via indice espacial (STRtree de GeoPandas) en vez de comparar cada rancho
+    # contra cada hotspot en Python puro: sjoin de los hotspots contra el buffer de 10km de cada
+    # rancho da exactamente los pares a <=10km del poligono real (no del centroide), el mismo
+    # criterio que el filtro `dist_km > 10` de antes, sin recorrer el producto cartesiano completo
+    ranchos_buffer = gpd.GeoDataFrame(
+        {"_ranch_idx": ranchos_m.index}, geometry=ranchos_m.geometry.buffer(radio_max_m), crs=CRS_METRICO,
+    )
+    hotspots_puntos = gpd.GeoDataFrame(
+        {"_hs_idx": hotspots.index}, geometry=hotspots_geom, crs=CRS_METRICO,
+    )
+    pares = gpd.sjoin(hotspots_puntos, ranchos_buffer, predicate="within", how="inner")
 
     filas = []
-    hotspots = hotspots.reset_index(drop=True)
-    hotspots_geom = hotspots_geom.reset_index(drop=True)
-
-    for i, rancho in ranchos_m.iterrows():
+    for _, par in pares.iterrows():
+        i, j = par["_ranch_idx"], par["_hs_idx"]
+        rancho = ranchos_m.loc[i]
+        hs = hotspots.loc[j]
         centroid_4326 = ranchos.geometry.loc[i].centroid
-        for j, hs in hotspots.iterrows():
-            hs_geom_m = hotspots_geom.loc[j]
-            # shapely Polygon.distance(Point) ya devuelve la distancia al punto del poligono
-            # (borde de la zona) mas cercano al hotspot, no al centroide - es lo que se necesita
-            # para saber cuanto margen real queda hasta que el fuego toque la finca
-            dist_m = rancho.geometry.distance(hs_geom_m)
-            dist_km = dist_m / 1000.0
-            if dist_km > 10:
-                continue
-            dentro = rancho.geometry.contains(hs_geom_m)
+        hs_geom_m = hotspots_geom.loc[j]
 
-            brng = bearing_deg(centroid_4326.y, centroid_4326.x, hs["latitude"], hs["longitude"])
-            cardinal = bearing_to_cardinal(brng)
-            ring = _ring_label(dist_km, dentro)
-            riesgo = RING_RISK.get(ring, "1/3")
-            ts_local = hs["acq_datetime"].tz_convert("Europe/Madrid").strftime("%Y-%m-%d %H:%M %Z")
+        # shapely Polygon.distance(Point) ya devuelve la distancia al punto del poligono
+        # (borde de la zona) mas cercano al hotspot, no al centroide - es lo que se necesita
+        # para saber cuanto margen real queda hasta que el fuego toque la finca
+        dist_m = rancho.geometry.distance(hs_geom_m)
+        dist_km = dist_m / 1000.0
+        if dist_km > RING_THRESHOLDS_KM[-1]:
+            # el buffer poligonal usado para el sjoin es una aproximacion del circulo real
+            # (segmentos rectos) - salvaguarda para no colar algun par justo en el borde
+            continue
+        dentro = rancho.geometry.contains(hs_geom_m)
 
-            # info del incendio (cluster) al que pertenece este hotspot, si ya se calculo
-            # (src/fires.py) - opcional, evaluar_riesgo tambien funciona sin ello
-            localidad = hs.get("localidad") or ""
-            municipio = hs.get("municipio") or ""
-            provincia = hs.get("provincia") or ""
-            duracion_h = hs.get("duracion_horas")
-            n_detecciones = hs.get("n_detecciones")
-            ultima_deteccion = hs.get("ultima_deteccion")
-            direccion_avance_es = hs.get("direccion_avance_es")
-            velocidad_kmh = hs.get("velocidad_kmh")
-            avance_confiable = bool(hs.get("avance_confiable"))
+        brng = bearing_deg(centroid_4326.y, centroid_4326.x, hs["latitude"], hs["longitude"])
+        cardinal = bearing_to_cardinal(brng)
+        ring = _ring_label(dist_km, dentro)
+        riesgo = RING_RISK.get(ring, "1/3")
+        ts_local = hs["acq_datetime"].tz_convert("Europe/Madrid").strftime("%Y-%m-%d %H:%M %Z")
 
-            # dedupe: localidad y municipio a veces coinciden (p.ej. capital de municipio)
-            partes_lugar = list(dict.fromkeys(p for p in [localidad, municipio, provincia] if p))
-            lugar = ", ".join(partes_lugar)
-            frase_lugar = f" en las inmediaciones de {lugar}" if lugar else ""
-            frase_duracion = (
-                f" El foco lleva activo al menos {formatear_duracion(duracion_h)} "
-                f"dentro de la ventana de detección consultada."
-                if pd.notna(duracion_h) else ""
-            )
-            frase_ultima = ""
-            if pd.notna(ultima_deteccion) and ultima_deteccion != hs["acq_datetime"]:
-                ultima_local = ultima_deteccion.tz_convert("Europe/Madrid").strftime("%Y-%m-%d %H:%M %Z")
-                frase_ultima = f" Última actualización del foco: {ultima_local}."
-            frase_avance = ""
-            if avance_confiable and direccion_avance_es and pd.notna(velocidad_kmh):
-                frase_avance = (
-                    f" El incendio muestra una tendencia de avance hacia el {direccion_avance_es}, "
-                    f"a una velocidad aproximada de {velocidad_kmh:.1f} km/h (estimación orientativa "
-                    f"a partir de las detecciones satelitales, no un modelo de propagación real)."
-                )
+        # info del incendio (cluster) al que pertenece este hotspot, si ya se calculo
+        # (src/fires.py) - opcional, evaluar_riesgo tambien funciona sin ello
+        localidad = hs.get("localidad") or ""
+        municipio = hs.get("municipio") or ""
+        provincia = hs.get("provincia") or ""
+        duracion_h = hs.get("duracion_horas")
+        n_detecciones = hs.get("n_detecciones")
+        ultima_deteccion = hs.get("ultima_deteccion")
+        direccion_avance_es = hs.get("direccion_avance_es")
+        velocidad_kmh = hs.get("velocidad_kmh")
+        avance_confiable = bool(hs.get("avance_confiable"))
 
-            mensaje = (
-                f"Detectado posible incendio (punto caliente) a fecha de {ts_local}"
-                f"{frase_lugar}, a {dist_km:.1f} km de su posición, dirección {CARDINAL_ES[cardinal]}."
-                f"{frase_duracion}{frase_ultima}{frase_avance} Esté alerta de su evolución. "
-                f"Actualmente se encuentra en riesgo {riesgo} respecto a su finca."
+        # dedupe: localidad y municipio a veces coinciden (p.ej. capital de municipio)
+        partes_lugar = list(dict.fromkeys(p for p in [localidad, municipio, provincia] if p))
+        lugar = ", ".join(partes_lugar)
+        frase_lugar = f" en las inmediaciones de {lugar}" if lugar else ""
+        frase_duracion = (
+            f" El foco lleva activo al menos {formatear_duracion(duracion_h)} "
+            f"dentro de la ventana de detección consultada."
+            if pd.notna(duracion_h) else ""
+        )
+        frase_ultima = ""
+        if pd.notna(ultima_deteccion) and ultima_deteccion != hs["acq_datetime"]:
+            ultima_local = ultima_deteccion.tz_convert("Europe/Madrid").strftime("%Y-%m-%d %H:%M %Z")
+            frase_ultima = f" Última actualización del foco: {ultima_local}."
+        frase_avance = ""
+        if avance_confiable and direccion_avance_es and pd.notna(velocidad_kmh):
+            frase_avance = (
+                f" El incendio muestra una tendencia de avance hacia el {direccion_avance_es}, "
+                f"a una velocidad aproximada de {velocidad_kmh:.1f} km/h (estimación orientativa "
+                f"a partir de las detecciones satelitales, no un modelo de propagación real)."
             )
 
-            filas.append({
-                "ranch_id": rancho["ranch_id"],
-                "ranch_name": rancho["ranch_name"],
-                "customer_name": rancho["customer_name"],
-                "customer_phone": rancho.get("customer_phone"),
-                "region": rancho.get("region"),
-                "tipo_ganaderia": rancho.get("tipo_ganaderia"),
-                "zona_nombre": rancho.get("zona_nombre"),
-                "distance_km": round(dist_km, 2),
-                "ring": ring,
-                "risk_level": riesgo,
-                "direction": cardinal,
-                "direction_es": CARDINAL_ES[cardinal],
-                "hotspot_lat": hs["latitude"],
-                "hotspot_lon": hs["longitude"],
-                "acq_datetime": hs["acq_datetime"],
-                "source": hs["source"],
-                "fire_id": hs.get("fire_id"),
-                "localidad": localidad,
-                "municipio": municipio,
-                "provincia": provincia,
-                "lugar": lugar,
-                "duracion_horas": duracion_h,
-                "n_detecciones_incendio": n_detecciones,
-                "ultima_deteccion": ultima_deteccion,
-                "direccion_avance_es": direccion_avance_es,
-                "velocidad_kmh": velocidad_kmh,
-                "avance_confiable": avance_confiable,
-                "mensaje_final": mensaje,
-            })
+        mensaje = (
+            f"Detectado posible incendio (punto caliente) a fecha de {ts_local}"
+            f"{frase_lugar}, a {dist_km:.1f} km de su posición, dirección {CARDINAL_ES[cardinal]}."
+            f"{frase_duracion}{frase_ultima}{frase_avance} Esté alerta de su evolución. "
+            f"Actualmente se encuentra en riesgo {riesgo} respecto a su finca."
+        )
+
+        filas.append({
+            "ranch_id": rancho["ranch_id"],
+            "ranch_name": rancho["ranch_name"],
+            "customer_name": rancho["customer_name"],
+            "customer_phone": rancho.get("customer_phone"),
+            "region": rancho.get("region"),
+            "tipo_ganaderia": rancho.get("tipo_ganaderia"),
+            "zona_nombre": rancho.get("zona_nombre"),
+            "distance_km": round(dist_km, 2),
+            "ring": ring,
+            "risk_level": riesgo,
+            "direction": cardinal,
+            "direction_es": CARDINAL_ES[cardinal],
+            "hotspot_lat": hs["latitude"],
+            "hotspot_lon": hs["longitude"],
+            "acq_datetime": hs["acq_datetime"],
+            "source": hs["source"],
+            "fire_id": hs.get("fire_id"),
+            "localidad": localidad,
+            "municipio": municipio,
+            "provincia": provincia,
+            "lugar": lugar,
+            "duracion_horas": duracion_h,
+            "n_detecciones_incendio": n_detecciones,
+            "ultima_deteccion": ultima_deteccion,
+            "direccion_avance_es": direccion_avance_es,
+            "velocidad_kmh": velocidad_kmh,
+            "avance_confiable": avance_confiable,
+            "mensaje_final": mensaje,
+        })
 
     if not filas:
         return pd.DataFrame()

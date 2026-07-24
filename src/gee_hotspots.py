@@ -1,4 +1,5 @@
 import os
+from concurrent.futures import ThreadPoolExecutor
 
 import ee
 import pandas as pd
@@ -67,6 +68,32 @@ def _puntos_de_coleccion(collection_id: str, scale: int, region: "ee.Geometry",
     return ee.FeatureCollection(ic.map(_por_imagen)).flatten()
 
 
+def _hotspots_de_fuente(source: str, collection_id: str, scale: int,
+                         region: "ee.Geometry", start: "ee.Date", end: "ee.Date",
+                         limite: int) -> pd.DataFrame | None:
+    pts = _puntos_de_coleccion(collection_id, scale, region, start, end)
+    try:
+        info = pts.limit(limite).getInfo()
+    except Exception:
+        return None
+    feats = info.get("features", [])
+    if not feats:
+        return None
+    rows = []
+    for f in feats:
+        props = f["properties"]
+        lon, lat = f["geometry"]["coordinates"]
+        rows.append({
+            "latitude": lat,
+            "longitude": lon,
+            "acq_datetime": pd.to_datetime(props["acq_millis"], unit="ms", utc=True),
+            "confidence": props.get("confidence_val"),
+            "frp": props.get("frp_val"),
+            "source": source,
+        })
+    return pd.DataFrame(rows)
+
+
 def obtener_hotspots_gee(bbox: tuple[float, float, float, float],
                           window_hours: int = WINDOW_HOURS_DEFAULT,
                           limite_por_fuente: int = 2000) -> pd.DataFrame:
@@ -79,29 +106,17 @@ def obtener_hotspots_gee(bbox: tuple[float, float, float, float],
     end = ee.Date(pd.Timestamp.utcnow().isoformat())
     start = end.advance(-window_hours, "hour")
 
-    frames = []
-    for source, (collection_id, scale) in SOURCES.items():
-        pts = _puntos_de_coleccion(collection_id, scale, region, start, end)
-        try:
-            info = pts.limit(limite_por_fuente).getInfo()
-        except Exception:
-            continue
-        feats = info.get("features", [])
-        if not feats:
-            continue
-        rows = []
-        for f in feats:
-            props = f["properties"]
-            lon, lat = f["geometry"]["coordinates"]
-            rows.append({
-                "latitude": lat,
-                "longitude": lon,
-                "acq_datetime": pd.to_datetime(props["acq_millis"], unit="ms", utc=True),
-                "confidence": props.get("confidence_val"),
-                "frp": props.get("frp_val"),
-                "source": source,
-            })
-        frames.append(pd.DataFrame(rows))
+    # las 3 fuentes son independientes entre si - cada .getInfo() es una llamada de red
+    # bloqueante a GEE, lanzarlas en paralelo reduce el tiempo total de "suma de las 3
+    # latencias" a "la mayor de las 3"
+    with ThreadPoolExecutor(max_workers=len(SOURCES)) as executor:
+        futures = [
+            executor.submit(_hotspots_de_fuente, source, collection_id, scale,
+                             region, start, end, limite_por_fuente)
+            for source, (collection_id, scale) in SOURCES.items()
+        ]
+        resultados = [f.result() for f in futures]
+    frames = [r for r in resultados if r is not None]
 
     if not frames:
         return pd.DataFrame(columns=["latitude", "longitude", "acq_datetime", "confidence", "frp", "source"])

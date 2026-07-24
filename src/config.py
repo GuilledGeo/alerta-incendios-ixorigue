@@ -32,9 +32,6 @@ RING_RISK = {
     "5-10 km": "1/3",
 }
 
-# radio (metros) del circulo aproximado para ranchos sin Zones.Polygon (IsPerimeter=true)
-RADIO_FALLBACK_M = 300
-
 COLORS_RING = {
     "Dentro (0 km)": "#d62728",
     "0-3 km": "#06d6a0",

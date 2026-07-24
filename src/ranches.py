@@ -7,7 +7,7 @@ from shapely import wkb
 from shapely.ops import unary_union
 from sqlalchemy import text
 
-from .config import RADIO_FALLBACK_M, RANCHOS_DATA_SOURCE, RANCHOS_SNAPSHOT_PATH, REPO_ROOT
+from .config import RANCHOS_DATA_SOURCE, RANCHOS_SNAPSHOT_PATH, REPO_ROOT
 
 # filtro de "cliente activo" real: no basta con que el Rancho no este deshabilitado/borrado,
 # el Customer al que pertenece tambien debe estar activo y sin borrar - en produccion hay
@@ -132,13 +132,16 @@ def _obtener_ranchos_snapshot() -> gpd.GeoDataFrame:
 
 
 def _obtener_ranchos_db() -> gpd.GeoDataFrame:
-    """Ranchos ES activos con geometria, en orden de preferencia:
+    """Ranchos ES activos con geometria real, en orden de preferencia:
     1. Zones.Polygon marcada IsPerimeter=true (perimetro real dibujado por el cliente).
     2. Union de todas las Zones activas del rancho (subdivisiones de pasto - aproxima el area
        realmente usada, aunque puede no cubrir todo el limite de la finca).
-    3. Circulo de RADIO_FALLBACK_M sobre Ranches.Location (sin ninguna zona dibujada).
 
-    Columna `fuente_geometria` indica cual de las 3 se uso, para dibujarlas distinto en el mapa.
+    Los ranchos sin ninguna zona dibujada (solo centroide en Ranches.Location) se descartan aqui:
+    un circulo aproximado sobre un punto no representa el limite real de la finca y no aporta
+    valor a una alerta de incendio - ver docs/plan_accion.md / conversacion 2026-07-24.
+
+    Columna `fuente_geometria` indica cual de las 2 se uso, para dibujarlas distinto en el mapa.
 
     NOTA: este repo de despliegue publico no incluye db_connection.py ni credenciales de BD a
     proposito - este modo ("db") solo existe/funciona en el monorepo interno ixo-geospacial. Aqui
@@ -189,21 +192,24 @@ def _obtener_ranchos_db() -> gpd.GeoDataFrame:
         lambda s: ", ".join(dict.fromkeys(n for n in s if n))
     )
 
-    def _geom_y_fuente(row):
-        rid = row["ranch_id"]
-        if rid in perimetros.index:
-            return perimetros.loc[rid, "geom"], "perimetro_dibujado", perimetros.loc[rid, "zone_name"] or ""
-        if rid in uniones.index:
-            return uniones.loc[rid], "union_de_zonas", nombres_union.get(rid) or ""
-        centro = gpd.GeoSeries(
-            [gpd.points_from_xy([row["lon"]], [row["lat"]])[0]], crs="EPSG:4326"
-        ).to_crs("EPSG:3857")
-        circulo = centro.buffer(RADIO_FALLBACK_M).to_crs("EPSG:4326").iloc[0]
-        return circulo, "circulo_aproximado", ""
+    # descarta los ranchos sin ninguna zona (ni perimetro ni union) antes de construir
+    # geometria - no interesan en este dashboard, ver docstring de la funcion
+    df_ranchos = df_ranchos[
+        df_ranchos["ranch_id"].isin(set(perimetros.index) | set(uniones.index))
+    ].copy()
 
-    resultado = df_ranchos.apply(_geom_y_fuente, axis=1, result_type="expand")
-    df_ranchos["geometry"] = resultado[0]
-    df_ranchos["fuente_geometria"] = resultado[1]
-    df_ranchos["zona_nombre"] = resultado[2]
+    # mapeo vectorizado en vez de un .apply(axis=1) por fila: perimetro tiene prioridad,
+    # y para los ranchos sin perimetro se rellena con la union de zonas
+    ids = df_ranchos["ranch_id"]
+    df_ranchos["geometry"] = ids.map(perimetros["geom"]).fillna(ids.map(uniones))
+    df_ranchos["fuente_geometria"] = ids.isin(perimetros.index).map(
+        {True: "perimetro_dibujado", False: "union_de_zonas"}
+    )
+    df_ranchos["zona_nombre"] = (
+        ids.map(perimetros["zone_name"]).fillna(ids.map(nombres_union)).fillna("")
+    )
+    # nombres de TODAS las zonas activas del rancho (perimetro + resto), no solo la usada
+    # como geometria - para mostrar en el tooltip del mapa independientemente de fuente_geometria
+    df_ranchos["zonas_nombres"] = ids.map(nombres_union).fillna("")
 
     return gpd.GeoDataFrame(df_ranchos, geometry="geometry", crs="EPSG:4326")

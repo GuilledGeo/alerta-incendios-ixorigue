@@ -9,6 +9,7 @@ import folium
 import geopandas as gpd
 import pandas as pd
 import streamlit as st
+from folium.plugins import MarkerCluster
 from streamlit_folium import st_folium
 
 # puente secrets.toml -> variables de entorno, ANTES de importar src.config/src.ranches (que
@@ -26,7 +27,7 @@ except Exception:
     pass
 
 from src.config import (
-    COLORS_RING, HOTSPOT_AGE_BINS_H, HOTSPOT_AGE_COLORS, RADIO_FALLBACK_M,
+    COLORS_RING, HOTSPOT_AGE_BINS_H, HOTSPOT_AGE_COLORS,
     RANCHOS_DATA_SOURCE, RANCHOS_SNAPSHOT_PATH, RING_RISK, RING_THRESHOLDS_KM, WINDOW_HOURS_DEFAULT,
 )
 
@@ -51,12 +52,10 @@ st.set_page_config(page_title="Alerta de incendios — Ixorigue", layout="wide",
 COLOR_FUENTE = {
     "perimetro_dibujado": "#3b82f6",
     "union_de_zonas": "#22c55e",
-    "circulo_aproximado": "#8b8f98",
 }
 DASH_FUENTE = {
     "perimetro_dibujado": None,
     "union_de_zonas": None,
-    "circulo_aproximado": "5,5",
 }
 RISK_BADGE = {
     "3/3": ("#ef4444", "RIESGO MÁXIMO"),
@@ -195,6 +194,32 @@ def _badge_html(risk_level: str) -> str:
     return f'<span class="ix-badge" style="background-color:{color}">{label} · {risk_level}</span>'
 
 
+# umbrales (horas desde la ultima deteccion satelital del foco) para diferenciar en el ranking
+# los avisos que siguen activos de los que probablemente ya estan controlados/extinguidos
+ESTADO_FOCO_ACTIVO_H = 24
+ESTADO_FOCO_CONTROLADO_H = 36
+
+
+def _estado_foco(ultima_deteccion) -> tuple[str, str, str]:
+    """(emoji+label, color, texto corto) segun antiguedad de la ultima deteccion del foco:
+    <24h = activo, 24-36h = en seguimiento (zona gris entre ambos umbrales), >=36h = controlado."""
+    if pd.isna(ultima_deteccion):
+        return "", "#6b7280", ""
+    horas = (pd.Timestamp.now(tz="UTC") - ultima_deteccion).total_seconds() / 3600.0
+    if horas < ESTADO_FOCO_ACTIVO_H:
+        return "🔥 Foco activo", "#ef4444", "Activo"
+    if horas >= ESTADO_FOCO_CONTROLADO_H:
+        return "✅ Foco controlado", "#22c55e", "Controlado"
+    return "🟡 En seguimiento", "#eab308", "En seguimiento"
+
+
+def _estado_foco_badge_html(ultima_deteccion) -> str:
+    label, color, _ = _estado_foco(ultima_deteccion)
+    if not label:
+        return ""
+    return f'<span class="ix-badge" style="background-color:{color}">{label}</span>'
+
+
 def _color_por_antiguedad(acq_datetime) -> tuple[str, str]:
     """Color del hotspot segun horas transcurridas desde su deteccion (label, color hex) -
     morado = recien detectado, va virando a rojo/naranja/amarillo/gris cuanto mas antiguo."""
@@ -208,9 +233,12 @@ def _color_por_antiguedad(acq_datetime) -> tuple[str, str]:
 
 
 def _tooltip_zona(row) -> str:
-    zona_nombre = row.get("zona_nombre")
-    base = f"{row['ranch_name']} ({row['customer_name']})"
-    return f"{base} · Zona: {zona_nombre}" if zona_nombre else base
+    # HTML: GeoJsonTooltip inserta el valor de cada campo via innerHTML, asi que las etiquetas
+    # <b>/<i> se renderizan - nombre de la ganaderia en negrita + todas las zonas activas del
+    # rancho (no solo la usada como geometria), para identificar la finca al pasar el cursor
+    zonas = row.get("zonas_nombres") or ""
+    zonas_html = f"<br><i>Zonas: {zonas}</i>" if zonas else ""
+    return f"<b>{row['ranch_name']}</b><br>{row['customer_name']}{zonas_html}"
 
 
 def _mapa_principal(ranchos_df, hotspots_df, resaltar_ids=None, centro=None, zoom=6):
@@ -218,24 +246,47 @@ def _mapa_principal(ranchos_df, hotspots_df, resaltar_ids=None, centro=None, zoo
     m = folium.Map(location=centro, zoom_start=zoom, tiles="CartoDB positron")
     folium.TileLayer("Esri.WorldImagery", name="Satélite").add_to(m)
 
+    # una sola capa GeoJson (FeatureCollection) para todos los ranchos, en vez de un
+    # folium.GeoJson por fila - Leaflet monta 1 capa vectorial en vez de N, mucho mas rapido
+    # de renderizar en el navegador cuando hay cientos de ranchos
+    features = []
     for _, row in ranchos_df.iterrows():
         resaltado = row["ranch_id"] in resaltar_ids
         color = COLOR_FUENTE[row["fuente_geometria"]]
         dash = DASH_FUENTE[row["fuente_geometria"]]
-        style = {
-            "color": "#ffd166" if resaltado else color,
-            "weight": 4 if resaltado else 1.5,
-            "fillOpacity": 0.35 if resaltado else 0.12,
-        }
-        if dash and not resaltado:
-            style["dashArray"] = dash
+        features.append({
+            "type": "Feature",
+            "geometry": row["geometry"].__geo_interface__,
+            "properties": {
+                "color": "#ffd166" if resaltado else color,
+                "weight": 4 if resaltado else 1.5,
+                "fillOpacity": 0.35 if resaltado else 0.12,
+                "dashArray": dash if (dash and not resaltado) else "",
+                "tooltip": f"{_tooltip_zona(row)} · {row['tipo_ganaderia']}",
+            },
+        })
+    if features:
+        def _style_rancho(feature):
+            props = feature["properties"]
+            style = {"color": props["color"], "weight": props["weight"], "fillOpacity": props["fillOpacity"]}
+            if props["dashArray"]:
+                style["dashArray"] = props["dashArray"]
+            return style
+
         folium.GeoJson(
-            row["geometry"].__geo_interface__,
-            style_function=lambda _f, style=style: style,
-            tooltip=f"{_tooltip_zona(row)} · {row['tipo_ganaderia']}",
+            {"type": "FeatureCollection", "features": features},
+            style_function=_style_rancho,
+            # al pasar el cursor sobre una zona, se resalta con borde grueso y color destacado
+            # para saber de un vistazo cual es, independientemente de su estilo base
+            highlight_function=lambda _f: {"weight": 5, "color": "#ffd166", "fillOpacity": 0.5},
+            tooltip=folium.GeoJsonTooltip(fields=["tooltip"], aliases=[""], labels=False, sticky=True),
         ).add_to(m)
 
     if hotspots_df is not None and not hotspots_df.empty:
+        # MarkerCluster agrupa los hotspots cercanos en un icono con contador mientras el
+        # mapa esta alejado - con cientos/miles de focos, evita que el navegador tenga que
+        # pintar todos los puntos individuales de una vez
+        cluster = MarkerCluster(name="Hotspots").add_to(m)
         for _, hs in hotspots_df.iterrows():
             lugar = ", ".join(p for p in [hs.get("localidad"), hs.get("provincia")] if p)
             edad_label, edad_color = _color_por_antiguedad(hs["acq_datetime"])
@@ -244,7 +295,7 @@ def _mapa_principal(ranchos_df, hotspots_df, resaltar_ids=None, centro=None, zoo
                 radius=5, color=edad_color, fill=True, fill_color=edad_color, fill_opacity=0.85,
                 tooltip=f"Hotspot {hs['source']} · {edad_label}" + (f" · {lugar}" if lugar else "")
                         + f" · {hs['acq_datetime']:%Y-%m-%d %H:%M} UTC",
-            ).add_to(m)
+            ).add_to(cluster)
 
     folium.LayerControl().add_to(m)
     return m
@@ -332,11 +383,12 @@ with ph_header:
     with col_info:
         with st.popover("ℹ️ Cómo funciona", width="stretch"):
             st.markdown(f"""
-**Ranchos y su geometría** — cada finca se dibuja con el mejor dato disponible, en este orden:
+**Ranchos y su geometría** — solo se incluyen ranchos con geometría real dibujada por el cliente,
+en este orden de preferencia:
 1. 🔵 **Perímetro real**: el límite que el cliente dibujó en la app (`Zones` marcada como perímetro).
 2. 🟢 **Unión de zonas**: si no hay perímetro, se unen todas las parcelas de pasto activas del rancho.
-3. ⚪ **Círculo aproximado** (línea discontinua): si no hay ninguna zona dibujada, un círculo de
-   {RADIO_FALLBACK_M} m sobre la ubicación del rancho — solo orientativo, no representa el límite real.
+
+Los ranchos sin ninguna zona dibujada (solo un punto de ubicación) no se muestran en este panel.
 
 **Detección de incendios** — se consultan puntos calientes (hotspots) de los satélites VIIRS
 (NOAA-20/SNPP) y FIRMS vía Google Earth Engine, dentro de una ventana fija de {WINDOW_HOURS_DEFAULT}h
@@ -451,7 +503,7 @@ with col_mapa:
     )
     st.markdown(
         '<p class="ix-legend">🔵 Perímetro real &nbsp;·&nbsp; 🟢 Unión de zonas &nbsp;·&nbsp; '
-        '⚪ Círculo aproximado (discontinuo) &nbsp;·&nbsp; 🟡 Coincide con el filtro/foco &nbsp;·&nbsp; '
+        '🟡 Coincide con el filtro/foco &nbsp;·&nbsp; '
         f'Hotspots por antigüedad: {leyenda_hotspots}</p>',
         unsafe_allow_html=True,
     )
@@ -487,7 +539,7 @@ n_riesgo_max = int((avisos["risk_level"] == "3/3").sum()) if avisos is not None 
 n_riesgo_alto = int((avisos["risk_level"] == "2/3").sum()) if avisos is not None else 0
 n_riesgo_vig = int((avisos["risk_level"] == "1/3").sum()) if avisos is not None else 0
 n_incendios = len(incendios) if incendios is not None else 0
-pct_geom_real = (ranchos["fuente_geometria"] != "circulo_aproximado").mean() * 100
+n_perimetro_real = int((ranchos["fuente_geometria"] == "perimetro_dibujado").sum())
 
 with ph_kpis:
     if RANCHOS_DATA_SOURCE == "snapshot" and "snapshot_exportado_en" in ranchos.columns:
@@ -500,7 +552,7 @@ with ph_kpis:
     k1, k2, k3, k4 = st.columns(4)
     k1.metric("Clientes activos", n_clientes)
     k2.metric("Ranchos activos", len(ranchos))
-    k3.metric("Geometría real", f"{pct_geom_real:.0f}%", help="% de ranchos con perímetro real o unión de zonas, no círculo aproximado")
+    k3.metric("🔵 Con perímetro dibujado", f"{n_perimetro_real} / {len(ranchos)}", help="Ranchos con perímetro real dibujado por el cliente, frente al total (el resto usa unión de zonas de pasto)")
     k4.metric("🔥 Incendios en España", n_incendios)
 
     k5, k6, k7, k8 = st.columns(4)
@@ -535,13 +587,21 @@ with col_panel:
 
                 for i, aviso in ranking.iterrows():
                     telefono = aviso.get("customer_phone")
-                    etiqueta = f"#{i + 1} · {aviso['risk_level']} · {aviso['ranch_name']} — {aviso['customer_name']}"
+                    _, _, estado_corto = _estado_foco(aviso.get("ultima_deteccion"))
+                    estado_sufijo = f" · {estado_corto}" if estado_corto else ""
+                    etiqueta = (
+                        f"#{i + 1} · {aviso['risk_level']}{estado_sufijo} · "
+                        f"{aviso['ranch_name']} — {aviso['customer_name']}"
+                    )
                     titulo = (
-                        f'{_badge_html(aviso["risk_level"])} &nbsp; <b>{aviso["ranch_name"]}</b> '
+                        f'{_badge_html(aviso["risk_level"])} '
+                        f'{_estado_foco_badge_html(aviso.get("ultima_deteccion"))} '
+                        f'&nbsp; <b>{aviso["ranch_name"]}</b> '
                         f'&nbsp;·&nbsp; {aviso["customer_name"]}'
                         + (f" &nbsp;·&nbsp; 📞 {telefono}" if pd.notna(telefono) and telefono else "")
                     )
-                    with st.expander(etiqueta, expanded=(i == 0)):
+                    key_expander = f"exp_ranking_{aviso['ranch_id']}"
+                    with st.expander(etiqueta, expanded=(i == 0), key=key_expander):
                         col_titulo_aviso, col_boton_foco = st.columns([4, 1.4])
                         with col_titulo_aviso:
                             st.markdown(titulo, unsafe_allow_html=True)
@@ -581,18 +641,22 @@ with col_panel:
                         st.info(aviso["mensaje_final"])
                         st.caption(f"Foco que dispara este aviso: {aviso['source']} · {aviso['acq_datetime']:%Y-%m-%d %H:%M} UTC")
 
-                        rancho_row = ranchos.loc[ranchos["ranch_id"] == aviso["ranch_id"]].iloc[0]
-                        # ojo: filtrar por Ranches.Location (rancho_row["lat"]/["lon"]) es un bug si
-                        # la geometria real (union de varias Zones, a veces dispersas) queda lejos de
-                        # ese punto guardado - se usa en su lugar el propio bbox del anillo de 10km
-                        # (el mismo que se dibuja), que por construccion siempre contiene cualquier
-                        # hotspot a <=10km del poligono, incluido el que dispara el aviso
-                        minx, miny, maxx, maxy = _anillos_riesgo(rancho_row["geometry"])[-1][1].bounds
-                        hs_cercanos = hotspots[
-                            hotspots["longitude"].between(minx, maxx) & hotspots["latitude"].between(miny, maxy)
-                        ]
-                        m_mini = _mapa_mini_aviso(rancho_row, aviso, hs_cercanos)
-                        st_folium(m_mini, width=None, height=260, returned_objects=[], key=f"mapa_ranking_{aviso['ranch_id']}")
+                        # el mini-mapa es lo mas caro de este bloque (construye un Folium
+                        # completo) - solo se genera si el usuario ha desplegado este aviso
+                        # concreto, en vez de recalcular los N mapas del ranking en cada rerun
+                        if st.session_state.get(key_expander, i == 0):
+                            rancho_row = ranchos.loc[ranchos["ranch_id"] == aviso["ranch_id"]].iloc[0]
+                            # ojo: filtrar por Ranches.Location (rancho_row["lat"]/["lon"]) es un bug si
+                            # la geometria real (union de varias Zones, a veces dispersas) queda lejos de
+                            # ese punto guardado - se usa en su lugar el propio bbox del anillo de 10km
+                            # (el mismo que se dibuja), que por construccion siempre contiene cualquier
+                            # hotspot a <=10km del poligono, incluido el que dispara el aviso
+                            minx, miny, maxx, maxy = _anillos_riesgo(rancho_row["geometry"])[-1][1].bounds
+                            hs_cercanos = hotspots[
+                                hotspots["longitude"].between(minx, maxx) & hotspots["latitude"].between(miny, maxy)
+                            ]
+                            m_mini = _mapa_mini_aviso(rancho_row, aviso, hs_cercanos)
+                            st_folium(m_mini, width=None, height=260, returned_objects=[], key=f"mapa_ranking_{aviso['ranch_id']}")
 
     # ---- LISTA DE GANADERIAS EN RIESGO (mismas que el ranking) ----
     with tab_lista:
@@ -602,14 +666,20 @@ with col_panel:
             else:
                 st.caption("Mismas ganaderías que el ranking de riesgo. Encabezados de columna: clic para ordenar.")
 
+                tabla_lista = avisos_filtrados.copy()
+                tabla_lista["estado_foco"] = tabla_lista["ultima_deteccion"].apply(
+                    lambda ud: _estado_foco(ud)[2]
+                )
+
                 columnas_lista = ["ranch_name", "customer_name", "customer_phone", "zona_nombre",
                                    "tipo_ganaderia", "region", "distance_km", "direction_es",
-                                   "risk_level", "ring", "lugar", "acq_datetime"]
-                tabla_lista = avisos_filtrados[columnas_lista].rename(columns={
+                                   "risk_level", "ring", "estado_foco", "lugar", "acq_datetime"]
+                tabla_lista = tabla_lista[columnas_lista].rename(columns={
                     "ranch_name": "Ganadería", "customer_name": "Cliente", "customer_phone": "Teléfono",
                     "zona_nombre": "Zona", "tipo_ganaderia": "Tipo", "region": "Región",
                     "distance_km": "Distancia (km)", "direction_es": "Dirección", "risk_level": "Riesgo",
-                    "ring": "Anillo", "lugar": "Localización del foco", "acq_datetime": "Detección (UTC)",
+                    "ring": "Anillo", "estado_foco": "Estado", "lugar": "Localización del foco",
+                    "acq_datetime": "Detección (UTC)",
                 })
                 tabla_lista["_orden"] = tabla_lista["Riesgo"].map(ORDEN_RIESGO)
                 tabla_lista = tabla_lista.sort_values(["_orden", "Distancia (km)"]).drop(columns="_orden")
