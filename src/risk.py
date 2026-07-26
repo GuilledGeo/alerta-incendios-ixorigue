@@ -39,6 +39,12 @@ def evaluar_riesgo(ranchos: gpd.GeoDataFrame, hotspots: pd.DataFrame) -> pd.Data
     if hotspots.empty or ranchos.empty:
         return pd.DataFrame(columns=COLUMNAS_AVISOS)
 
+    # reset_index es imprescindible: ranchos puede venir con un indice no contiguo (tras
+    # filtrar en src/ranches.py los ranchos sin zona) - al construir mas abajo un GeoDataFrame
+    # combinando un dict plano ("_ranch_idx": ranchos_m.index) con una geometry= que conserva
+    # su propio indice, pandas alinea por etiqueta y desincroniza silenciosamente ambas columnas
+    # (geometrias a None o emparejadas con el rancho equivocado) si el indice no es 0..n-1
+    ranchos = ranchos.reset_index(drop=True)
     ranchos_m = ranchos.to_crs(CRS_METRICO)
     hotspots = hotspots.reset_index(drop=True)
     hotspots_geom = gpd.GeoSeries(
