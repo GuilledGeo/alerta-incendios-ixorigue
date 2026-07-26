@@ -44,7 +44,7 @@ except Exception:
     pass
 from src.fires import calcular_avance, excluir_paises, formatear_duracion, geocodificar_incendios, identificar_incendios
 from src.gee_hotspots import obtener_hotspots_gee
-from src.ranches import obtener_ranchos_es, obtener_ultimas_posiciones
+from src.ranches import obtener_ranchos_es
 from src.risk import evaluar_riesgo
 
 st.set_page_config(page_title="Alerta de incendios — Ixorigue", layout="wide", page_icon="🔥", initial_sidebar_state="collapsed")
@@ -706,14 +706,12 @@ with col_panel:
                             hs_cercanos = hotspots[
                                 hotspots["longitude"].between(minx, maxx) & hotspots["latitude"].between(miny, maxy)
                             ]
-                            # ultima posicion de los animales: solo disponible con BD en vivo
-                            # (RANCHOS_DATA_SOURCE=db) - devuelve None sin avisar en el despliegue
-                            # publico (snapshot), donde este dato en vivo no existe
-                            posiciones = obtener_ultimas_posiciones(aviso["ranch_id"])
-                            m_mini = _mapa_mini_aviso(rancho_row, aviso, hs_cercanos, posiciones)
+                            # nota: la ultima posicion de los animales (obtener_ultimas_posiciones,
+                            # src/ranches.py) se quito de este repo publico - requiere BD en vivo,
+                            # que este repo no tiene por diseno; se mantiene en la copia interna
+                            # ixo-geospacial, con acceso a la BD de produccion
+                            m_mini = _mapa_mini_aviso(rancho_row, aviso, hs_cercanos)
                             st_folium(m_mini, width=None, height=260, returned_objects=[], key=f"mapa_ranking_{aviso['ranch_id']}")
-                            if posiciones is not None and not posiciones.empty:
-                                st.caption(f"🐾 {len(posiciones)} animal(es) con posición GPS en los últimos 7 días (punto azul).")
 
     # ---- LISTA DE GANADERIAS EN RIESGO (mismas que el ranking) ----
     with tab_lista:
