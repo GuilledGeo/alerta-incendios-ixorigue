@@ -223,3 +223,53 @@ def _obtener_ranchos_db() -> gpd.GeoDataFrame:
     df_ranchos["zonas_nombres"] = ids.map(nombres_union).fillna("")
 
     return gpd.GeoDataFrame(df_ranchos, geometry="geometry", crs="EPSG:4326")
+
+
+# ultima posicion GPS valida de cada animal activo del rancho, dentro de una ventana reciente
+# (un fix de hace semanas no sirve como "posicion actual"). LocationsHistory es la tabla
+# recomendada para esto (AnimalLocations/DeviceLocations quedaron deprecadas para analitica -
+# ver docs/log_proyecto.md de ixo-parto, Paso 35). Sigue la misma convencion que QUERY_RANCHOS:
+# DISTINCT ON en vez de MAX(uuid), y filtro de fecha obligatorio para no escanear todo el historico
+QUERY_ULTIMAS_POSICIONES = text("""
+    SELECT DISTINCT ON (lh."DeviceId")
+        lh."DeviceId" AS device_id, a."Id" AS animal_id, a."Specie" AS specie,
+        lh."Timestamp" AS ultima_posicion,
+        ST_Y(ST_Transform(lh."Location"::geometry, 4326)) AS lat,
+        ST_X(ST_Transform(lh."Location"::geometry, 4326)) AS lon
+    FROM "LocationsHistory" lh
+    JOIN "Devices" d ON d."Id" = lh."DeviceId"
+    LEFT JOIN "Animals" a ON a."DeviceId" = d."Id" AND a."IsDeregistered" = FALSE
+    WHERE d."RanchId" = :ranch_id
+      AND COALESCE(lh."IsValid", FALSE) = TRUE
+      AND lh."IsLowAccuracy" = FALSE
+      AND lh."Timestamp" >= NOW() - INTERVAL '7 days'
+    ORDER BY lh."DeviceId", lh."Timestamp" DESC
+""")
+
+
+def obtener_ultimas_posiciones(ranch_id) -> gpd.GeoDataFrame | None:
+    """Ultima posicion GPS (ultimos 7 dias) de cada animal activo del rancho `ranch_id`.
+
+    Solo funciona con acceso a BD en vivo: en el despliegue publico (RANCHOS_DATA_SOURCE=snapshot,
+    sin db_connection.py) devuelve None sin lanzar excepcion - la posicion de los animales es un
+    dato en vivo que no tiene sentido meter en el snapshot estatico de ranchos/clientes. La UI debe
+    tratar `None` como "seccion no disponible en este modo", no como un error.
+    """
+    if RANCHOS_DATA_SOURCE == "snapshot":
+        return None
+    try:
+        sys.path.insert(0, str(REPO_ROOT))
+        from db_connection import get_engine  # noqa: E402
+    except ModuleNotFoundError:
+        return None
+
+    engine = get_engine()
+    with engine.connect() as conn:
+        df = pd.read_sql(QUERY_ULTIMAS_POSICIONES, conn, params={"ranch_id": ranch_id})
+
+    if df.empty:
+        return None
+    df["specie_es"] = df["specie"].map(SPECIE_ES).fillna(df["specie"].fillna("Sin especificar"))
+    return gpd.GeoDataFrame(
+        df, geometry=gpd.points_from_xy(df["lon"], df["lat"]), crs="EPSG:4326",
+    )

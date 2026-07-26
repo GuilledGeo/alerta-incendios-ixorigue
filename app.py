@@ -9,7 +9,7 @@ import folium
 import geopandas as gpd
 import pandas as pd
 import streamlit as st
-from folium.plugins import MarkerCluster
+from folium.plugins import MeasureControl
 from streamlit_folium import st_folium
 
 # puente secrets.toml -> variables de entorno, ANTES de importar src.config/src.ranches (que
@@ -44,7 +44,7 @@ except Exception:
     pass
 from src.fires import calcular_avance, excluir_paises, formatear_duracion, geocodificar_incendios, identificar_incendios
 from src.gee_hotspots import obtener_hotspots_gee
-from src.ranches import obtener_ranchos_es
+from src.ranches import obtener_ranchos_es, obtener_ultimas_posiciones
 from src.risk import evaluar_riesgo
 
 st.set_page_config(page_title="Alerta de incendios — Ixorigue", layout="wide", page_icon="🔥", initial_sidebar_state="collapsed")
@@ -232,13 +232,26 @@ def _color_por_antiguedad(acq_datetime) -> tuple[str, str]:
     return label, HOTSPOT_AGE_COLORS[label]
 
 
-def _tooltip_zona(row) -> str:
+def _tooltip_zona(row, incluir_tipo: bool = False) -> str:
     # HTML: GeoJsonTooltip inserta el valor de cada campo via innerHTML, asi que las etiquetas
     # <b>/<i> se renderizan - nombre de la ganaderia en negrita + todas las zonas activas del
     # rancho (no solo la usada como geometria), para identificar la finca al pasar el cursor
+    ranch_name = row["ranch_name"]
+    customer_name = row["customer_name"]
+    lineas = [f"<b>{ranch_name}</b>"]
+    # autonomos: el nombre del cliente y el de la ganaderia suelen coincidir - mostrarlo una
+    # sola vez en vez de repetido en dos lineas
+    if customer_name and customer_name != ranch_name:
+        lineas.append(customer_name)
+    telefono = row.get("customer_phone")
+    if pd.notna(telefono) and telefono:
+        lineas.append(f"📞 {telefono}")
+    if incluir_tipo and row.get("tipo_ganaderia"):
+        lineas.append(row["tipo_ganaderia"])
     zonas = row.get("zonas_nombres") or ""
-    zonas_html = f"<br><i>Zonas: {zonas}</i>" if zonas else ""
-    return f"<b>{row['ranch_name']}</b><br>{row['customer_name']}{zonas_html}"
+    if zonas:
+        lineas.append(f"<i>Zonas: {zonas}</i>")
+    return "<br>".join(lineas)
 
 
 def _mapa_principal(ranchos_df, hotspots_df, resaltar_ids=None, centro=None, zoom=6):
@@ -262,7 +275,7 @@ def _mapa_principal(ranchos_df, hotspots_df, resaltar_ids=None, centro=None, zoo
                 "weight": 4 if resaltado else 1.5,
                 "fillOpacity": 0.35 if resaltado else 0.12,
                 "dashArray": dash if (dash and not resaltado) else "",
-                "tooltip": f"{_tooltip_zona(row)} · {row['tipo_ganaderia']}",
+                "tooltip": _tooltip_zona(row, incluir_tipo=True),
             },
         })
     if features:
@@ -283,10 +296,9 @@ def _mapa_principal(ranchos_df, hotspots_df, resaltar_ids=None, centro=None, zoo
         ).add_to(m)
 
     if hotspots_df is not None and not hotspots_df.empty:
-        # MarkerCluster agrupa los hotspots cercanos en un icono con contador mientras el
-        # mapa esta alejado - con cientos/miles de focos, evita que el navegador tenga que
-        # pintar todos los puntos individuales de una vez
-        cluster = MarkerCluster(name="Hotspots").add_to(m)
+        # sin clustering: se quieren ver todos los puntos individuales, sin agrupar en un
+        # icono con contador aunque el mapa este alejado
+        capa_hotspots = folium.FeatureGroup(name="Hotspots").add_to(m)
         for _, hs in hotspots_df.iterrows():
             lugar = ", ".join(p for p in [hs.get("localidad"), hs.get("provincia")] if p)
             edad_label, edad_color = _color_por_antiguedad(hs["acq_datetime"])
@@ -295,7 +307,14 @@ def _mapa_principal(ranchos_df, hotspots_df, resaltar_ids=None, centro=None, zoo
                 radius=5, color=edad_color, fill=True, fill_color=edad_color, fill_opacity=0.85,
                 tooltip=f"Hotspot {hs['source']} · {edad_label}" + (f" · {lugar}" if lugar else "")
                         + f" · {hs['acq_datetime']:%Y-%m-%d %H:%M} UTC",
-            ).add_to(cluster)
+            ).add_to(capa_hotspots)
+
+    # herramienta de regla (distancias/areas) en el mapa principal, para medir a ojo la
+    # separacion entre un foco y una finca sin depender solo de los anillos de riesgo
+    MeasureControl(
+        position="topleft", primary_length_unit="kilometers", secondary_length_unit="meters",
+        primary_area_unit="hectares",
+    ).add_to(m)
 
     folium.LayerControl().add_to(m)
     return m
@@ -314,10 +333,11 @@ def _anillos_riesgo(rancho_geom):
     ]
 
 
-def _mapa_mini_aviso(rancho_row, aviso_row, hotspots_cercanos):
+def _mapa_mini_aviso(rancho_row, aviso_row, hotspots_cercanos, posiciones_animales=None):
     """Mapa individual de un aviso: perimetro del rancho, anillos de riesgo (zonas de seguridad),
-    hotspot(s) cercanos, y linea de distancia entre el centroide del rancho y el hotspot que
-    disparo el aviso."""
+    hotspot(s) cercanos, linea de distancia entre el centroide del rancho y el hotspot que
+    disparo el aviso, y (si hay BD en vivo) la ultima posicion conocida de los animales del
+    rancho - para ver de un vistazo si el ganado esta cerca del foco, no solo la finca."""
     centroid = rancho_row["geometry"].centroid
     m = folium.Map(location=[centroid.y, centroid.x], zoom_start=11, tiles="Esri.WorldImagery")
 
@@ -350,6 +370,16 @@ def _mapa_mini_aviso(rancho_row, aviso_row, hotspots_cercanos):
         color="#ffd166", weight=2, dash_array="6,6",
         tooltip=f"{aviso_row['distance_km']:.1f} km",
     ).add_to(m)
+
+    if posiciones_animales is not None and not posiciones_animales.empty:
+        ahora = pd.Timestamp.now(tz="UTC")
+        for _, pos in posiciones_animales.iterrows():
+            hace_h = (ahora - pos["ultima_posicion"]).total_seconds() / 3600.0
+            folium.CircleMarker(
+                location=[pos["lat"], pos["lon"]],
+                radius=4, color="#38bdf8", fill=True, fill_color="#38bdf8", fill_opacity=0.9,
+                tooltip=f"🐾 {pos.get('specie_es') or 'Animal'} · hace {formatear_duracion(hace_h)}",
+            ).add_to(m)
 
     # encuadre que cubra la mayor zona de seguridad (10 km) ademas del hotspot, para que se
     # vean los anillos completos y no solo el segmento centroide-hotspot
@@ -550,8 +580,14 @@ with ph_kpis:
         st.caption(f"🛰️ Última consulta a GEE: hace {edad_min} min · ventana de {window_hours}h · {n_clientes} clientes activos, {len(ranchos)} ranchos activos.")
 
     k1, k2, k3, k4 = st.columns(4)
-    k1.metric("Clientes activos", n_clientes)
-    k2.metric("Ranchos activos", len(ranchos))
+    k1.metric(
+        "Clientes activos", n_clientes,
+        help="Clientes con al menos un rancho con zonas y/o perímetro dibujados en la app - los ranchos sin ninguna zona dibujada (solo un punto de ubicación) no se cuentan aquí.",
+    )
+    k2.metric(
+        "Ranchos activos", len(ranchos),
+        help="Ranchos con zonas y/o perímetro dibujados en la app - se excluyen los ranchos sin ninguna zona dibujada (solo un punto de ubicación).",
+    )
     k3.metric("🔵 Con perímetro dibujado", f"{n_perimetro_real} / {len(ranchos)}", help="Ranchos con perímetro real dibujado por el cliente, frente al total (el resto usa unión de zonas de pasto)")
     k4.metric("🔥 Incendios en España", n_incendios)
 
@@ -600,8 +636,7 @@ with col_panel:
                         f'&nbsp;·&nbsp; {aviso["customer_name"]}'
                         + (f" &nbsp;·&nbsp; 📞 {telefono}" if pd.notna(telefono) and telefono else "")
                     )
-                    key_expander = f"exp_ranking_{aviso['ranch_id']}"
-                    with st.expander(etiqueta, expanded=(i == 0), key=key_expander):
+                    with st.expander(etiqueta, expanded=(i == 0)):
                         col_titulo_aviso, col_boton_foco = st.columns([4, 1.4])
                         with col_titulo_aviso:
                             st.markdown(titulo, unsafe_allow_html=True)
@@ -615,7 +650,10 @@ with col_panel:
                         c2.metric("Anillo", aviso["ring"])
                         c3.metric("Dirección", aviso["direction_es"].capitalize())
                         duracion_h = aviso.get("duracion_horas")
-                        c4.metric("Activo hace", formatear_duracion(duracion_h) if pd.notna(duracion_h) else "—")
+                        c4.metric(
+                            "Duración detectado", formatear_duracion(duracion_h) if pd.notna(duracion_h) else "—",
+                            help="Tiempo entre la primera y la última detección satelital de este foco - no indica si sigue activo ahora mismo (para eso, ver el badge de estado junto al riesgo).",
+                        )
                         ultima_det = aviso.get("ultima_deteccion")
                         c5.metric(
                             "Última act.",
@@ -642,9 +680,22 @@ with col_panel:
                         st.caption(f"Foco que dispara este aviso: {aviso['source']} · {aviso['acq_datetime']:%Y-%m-%d %H:%M} UTC")
 
                         # el mini-mapa es lo mas caro de este bloque (construye un Folium
-                        # completo) - solo se genera si el usuario ha desplegado este aviso
-                        # concreto, en vez de recalcular los N mapas del ranking en cada rerun
-                        if st.session_state.get(key_expander, i == 0):
+                        # completo) - solo se genera bajo peticion explicita de este boton, no
+                        # automaticamente al desplegar el expander: st.expander no expone de
+                        # forma fiable su estado abierto/cerrado via session_state (por eso antes
+                        # solo el aviso #1 -el que viene expanded=True de fabrica- mostraba mapa)
+                        key_mapa_visible = f"mapa_visible_{aviso['ranch_id']}"
+                        if key_mapa_visible not in st.session_state:
+                            st.session_state[key_mapa_visible] = (i == 0)
+                        mostrar_mapa = st.session_state[key_mapa_visible]
+                        if st.button(
+                            "🗺️ Ocultar mapa" if mostrar_mapa else "🗺️ Mostrar mapa",
+                            key=f"toggle_mapa_{aviso['ranch_id']}",
+                        ):
+                            st.session_state[key_mapa_visible] = not mostrar_mapa
+                            st.rerun()
+
+                        if st.session_state[key_mapa_visible]:
                             rancho_row = ranchos.loc[ranchos["ranch_id"] == aviso["ranch_id"]].iloc[0]
                             # ojo: filtrar por Ranches.Location (rancho_row["lat"]/["lon"]) es un bug si
                             # la geometria real (union de varias Zones, a veces dispersas) queda lejos de
@@ -655,8 +706,14 @@ with col_panel:
                             hs_cercanos = hotspots[
                                 hotspots["longitude"].between(minx, maxx) & hotspots["latitude"].between(miny, maxy)
                             ]
-                            m_mini = _mapa_mini_aviso(rancho_row, aviso, hs_cercanos)
+                            # ultima posicion de los animales: solo disponible con BD en vivo
+                            # (RANCHOS_DATA_SOURCE=db) - devuelve None sin avisar en el despliegue
+                            # publico (snapshot), donde este dato en vivo no existe
+                            posiciones = obtener_ultimas_posiciones(aviso["ranch_id"])
+                            m_mini = _mapa_mini_aviso(rancho_row, aviso, hs_cercanos, posiciones)
                             st_folium(m_mini, width=None, height=260, returned_objects=[], key=f"mapa_ranking_{aviso['ranch_id']}")
+                            if posiciones is not None and not posiciones.empty:
+                                st.caption(f"🐾 {len(posiciones)} animal(es) con posición GPS en los últimos 7 días (punto azul).")
 
     # ---- LISTA DE GANADERIAS EN RIESGO (mismas que el ranking) ----
     with tab_lista:
