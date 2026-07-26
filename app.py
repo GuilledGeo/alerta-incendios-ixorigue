@@ -296,18 +296,36 @@ def _mapa_principal(ranchos_df, hotspots_df, resaltar_ids=None, centro=None, zoo
         ).add_to(m)
 
     if hotspots_df is not None and not hotspots_df.empty:
-        # sin clustering: se quieren ver todos los puntos individuales, sin agrupar en un
-        # icono con contador aunque el mapa este alejado
-        capa_hotspots = folium.FeatureGroup(name="Hotspots").add_to(m)
+        # sin clustering (se quieren ver todos los puntos individuales, no agrupados en un
+        # icono con contador) pero consolidados en UNA sola capa GeoJson en vez de un
+        # folium.CircleMarker por fila - con miles de hotspots, montar miles de capas Leaflet
+        # por separado es lo que hacia lenta la carga del mapa; una FeatureCollection con
+        # marker=CircleMarker(...) da el mismo resultado visual mucho mas rapido
+        features_hs = []
         for _, hs in hotspots_df.iterrows():
             lugar = ", ".join(p for p in [hs.get("localidad"), hs.get("provincia")] if p)
             edad_label, edad_color = _color_por_antiguedad(hs["acq_datetime"])
-            folium.CircleMarker(
-                location=[hs["latitude"], hs["longitude"]],
-                radius=5, color=edad_color, fill=True, fill_color=edad_color, fill_opacity=0.85,
-                tooltip=f"Hotspot {hs['source']} · {edad_label}" + (f" · {lugar}" if lugar else "")
-                        + f" · {hs['acq_datetime']:%Y-%m-%d %H:%M} UTC",
-            ).add_to(capa_hotspots)
+            features_hs.append({
+                "type": "Feature",
+                "geometry": {"type": "Point", "coordinates": [hs["longitude"], hs["latitude"]]},
+                "properties": {
+                    "color": edad_color,
+                    "tooltip": f"Hotspot {hs['source']} · {edad_label}" + (f" · {lugar}" if lugar else "")
+                               + f" · {hs['acq_datetime']:%Y-%m-%d %H:%M} UTC",
+                },
+            })
+
+        def _style_hotspot(feature):
+            color = feature["properties"]["color"]
+            return {"color": color, "fillColor": color, "fillOpacity": 0.85, "weight": 1}
+
+        folium.GeoJson(
+            {"type": "FeatureCollection", "features": features_hs},
+            name="Hotspots",
+            marker=folium.CircleMarker(radius=5, fill=True),
+            style_function=_style_hotspot,
+            tooltip=folium.GeoJsonTooltip(fields=["tooltip"], aliases=[""], labels=False),
+        ).add_to(m)
 
     # herramienta de regla (distancias/areas) en el mapa principal, para medir a ojo la
     # separacion entre un foco y una finca sin depender solo de los anillos de riesgo
