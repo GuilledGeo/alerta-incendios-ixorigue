@@ -44,7 +44,7 @@ except Exception:
     pass
 from src.fires import calcular_avance, excluir_paises, formatear_duracion, geocodificar_incendios, identificar_incendios
 from src.gee_hotspots import obtener_hotspots_gee
-from src.ranches import obtener_ranchos_es
+from src.ranches import obtener_ranchos_es, obtener_zonas_es
 from src.risk import evaluar_riesgo
 
 st.set_page_config(page_title="Alerta de incendios — Ixorigue", layout="wide", page_icon="🔥", initial_sidebar_state="collapsed")
@@ -148,6 +148,11 @@ def _cargar_ranchos():
     return obtener_ranchos_es()
 
 
+@st.cache_data(ttl=1800, show_spinner="Cargando zonas de clientes desde BD...")
+def _cargar_zonas():
+    return obtener_zonas_es()
+
+
 @st.cache_data(ttl=900, show_spinner="Consultando hotspots en Google Earth Engine...")
 def _cargar_hotspots(bbox, window_hours):
     return obtener_hotspots_gee(bbox, window_hours), datetime.now(timezone.utc)
@@ -232,10 +237,10 @@ def _color_por_antiguedad(acq_datetime) -> tuple[str, str]:
     return label, HOTSPOT_AGE_COLORS[label]
 
 
-def _tooltip_zona(row, incluir_tipo: bool = False) -> str:
+def _tooltip_zona(row, incluir_tipo: bool = False, zona_individual: str | None = None) -> str:
     # HTML: GeoJsonTooltip inserta el valor de cada campo via innerHTML, asi que las etiquetas
-    # <b>/<i> se renderizan - nombre de la ganaderia en negrita + todas las zonas activas del
-    # rancho (no solo la usada como geometria), para identificar la finca al pasar el cursor
+    # <b>/<i> se renderizan - nombre de la ganaderia en negrita + zona(s), para identificar la
+    # finca (y, si se pasa zona_individual, la parcela concreta bajo el cursor) al hacer hover
     ranch_name = row["ranch_name"]
     customer_name = row["customer_name"]
     lineas = [f"<b>{ranch_name}</b>"]
@@ -248,18 +253,32 @@ def _tooltip_zona(row, incluir_tipo: bool = False) -> str:
         lineas.append(f"📞 {telefono}")
     if incluir_tipo and row.get("tipo_ganaderia"):
         lineas.append(row["tipo_ganaderia"])
-    zonas = row.get("zonas_nombres") or ""
-    if zonas:
-        lineas.append(f"<i>Zonas: {zonas}</i>")
+    if zona_individual:
+        # se esta dibujando UNA parcela concreta (rancho con varias zonas dispersas fusionadas
+        # para el calculo de distancia) - mostrar solo el nombre de ESA parcela, no la lista
+        # entera, que es lo que impedia saber cual era cual al pasar el cursor
+        lineas.append(f"<i>Zona: {zona_individual}</i>")
+    else:
+        zonas = row.get("zonas_nombres") or ""
+        if zonas:
+            lineas.append(f"<i>Zonas: {zonas}</i>")
     return "<br>".join(lineas)
 
 
-def _mapa_principal(ranchos_df, hotspots_df, resaltar_ids=None, centro=None, zoom=6):
+def _mapa_principal(ranchos_df, hotspots_df, resaltar_ids=None, centro=None, zoom=6, zonas_df=None):
     resaltar_ids = resaltar_ids or set()
     m = folium.Map(location=centro, zoom_start=zoom, tiles="CartoDB positron")
     folium.TileLayer("Esri.WorldImagery", name="Satélite").add_to(m)
 
-    # una sola capa GeoJson (FeatureCollection) para todos los ranchos, en vez de un
+    # zonas individuales (sin fusionar), agrupadas por rancho, para dibujar cada parcela por
+    # separado con su propio nombre en vez de la geometria fusionada de "union_de_zonas" - sin
+    # esto (zonas_df is None: sin BD, o snapshot generado antes de incluir esta capa) se cae al
+    # comportamiento anterior, una sola forma fusionada por rancho con tooltip generico
+    zonas_por_rancho = (
+        {rid: grupo for rid, grupo in zonas_df.groupby("ranch_id")} if zonas_df is not None else {}
+    )
+
+    # una sola capa GeoJson (FeatureCollection) para todos los ranchos/zonas, en vez de un
     # folium.GeoJson por fila - Leaflet monta 1 capa vectorial en vez de N, mucho mas rapido
     # de renderizar en el navegador cuando hay cientos de ranchos
     features = []
@@ -267,17 +286,31 @@ def _mapa_principal(ranchos_df, hotspots_df, resaltar_ids=None, centro=None, zoo
         resaltado = row["ranch_id"] in resaltar_ids
         color = COLOR_FUENTE[row["fuente_geometria"]]
         dash = DASH_FUENTE[row["fuente_geometria"]]
-        features.append({
-            "type": "Feature",
-            "geometry": row["geometry"].__geo_interface__,
-            "properties": {
-                "color": "#ffd166" if resaltado else color,
-                "weight": 4 if resaltado else 1.5,
-                "fillOpacity": 0.35 if resaltado else 0.12,
-                "dashArray": dash if (dash and not resaltado) else "",
-                "tooltip": _tooltip_zona(row, incluir_tipo=True),
-            },
-        })
+        style_props = {
+            "color": "#ffd166" if resaltado else color,
+            "weight": 4 if resaltado else 1.5,
+            "fillOpacity": 0.35 if resaltado else 0.12,
+            "dashArray": dash if (dash and not resaltado) else "",
+        }
+        zonas_rancho = (
+            zonas_por_rancho.get(row["ranch_id"]) if row["fuente_geometria"] == "union_de_zonas" else None
+        )
+        if zonas_rancho is not None and not zonas_rancho.empty:
+            for _, zona in zonas_rancho.iterrows():
+                features.append({
+                    "type": "Feature",
+                    "geometry": zona["geometry"].__geo_interface__,
+                    "properties": {
+                        **style_props,
+                        "tooltip": _tooltip_zona(row, incluir_tipo=True, zona_individual=zona.get("zone_name") or "Sin nombre"),
+                    },
+                })
+        else:
+            features.append({
+                "type": "Feature",
+                "geometry": row["geometry"].__geo_interface__,
+                "properties": {**style_props, "tooltip": _tooltip_zona(row, incluir_tipo=True)},
+            })
     if features:
         def _style_rancho(feature):
             props = feature["properties"]
@@ -399,6 +432,11 @@ def _mapa_mini_aviso(rancho_row, aviso_row, hotspots_cercanos, posiciones_animal
                 tooltip=f"🐾 {pos.get('specie_es') or 'Animal'} · hace {formatear_duracion(hace_h)}",
             ).add_to(m)
 
+    MeasureControl(
+        position="topleft", primary_length_unit="kilometers", secondary_length_unit="meters",
+        primary_area_unit="hectares",
+    ).add_to(m)
+
     # encuadre que cubra la mayor zona de seguridad (10 km) ademas del hotspot, para que se
     # vean los anillos completos y no solo el segmento centroide-hotspot
     minx, miny, maxx, maxy = _anillos_riesgo(rancho_row["geometry"])[-1][1].bounds
@@ -482,6 +520,7 @@ Un rancho solo genera un aviso por el hotspot más grave. La **dirección** es e
 # ============================== BARRA DE FILTROS (se calcula antes del mapa) ==============================
 
 ranchos = _cargar_ranchos()
+zonas = _cargar_zonas()
 bbox = _bbox_de_ranchos(ranchos)
 
 OPCION_SIN_GANADERIA = "(todas las ganaderías)"
@@ -563,7 +602,7 @@ with col_mapa:
         centro = [rancho_foco["lat"], rancho_foco["lon"]]
         zoom = 13
         resaltar = {foco_id}
-        m = _mapa_principal(ranchos, hotspots, resaltar_ids=resaltar, centro=centro, zoom=zoom)
+        m = _mapa_principal(ranchos, hotspots, resaltar_ids=resaltar, centro=centro, zoom=zoom, zonas_df=zonas)
         st_folium(m, width=None, height=MAP_HEIGHT, returned_objects=[], key="mapa_general")
     elif ranchos_filtrados.empty:
         st.warning("Ningún rancho coincide con los filtros.")
@@ -571,7 +610,7 @@ with col_mapa:
         centro = [ranchos_filtrados["lat"].mean(), ranchos_filtrados["lon"].mean()]
         zoom = 6 if not hay_filtro else 9
         resaltar = set(ranchos_filtrados["ranch_id"]) if hay_filtro else None
-        m = _mapa_principal(ranchos, hotspots, resaltar_ids=resaltar, centro=centro, zoom=zoom)
+        m = _mapa_principal(ranchos, hotspots, resaltar_ids=resaltar, centro=centro, zoom=zoom, zonas_df=zonas)
         if hay_filtro:
             # encuadre exacto a la(s) zona(s) que coinciden con el filtro (busqueda, tipo o
             # region), esten o no en el ranking de riesgo - el zoom fijo de arriba es solo
@@ -624,7 +663,12 @@ with col_panel:
 
     # ---- RANKING DE GANADERIAS EN RIESGO ----
     with tab_ranking:
-        with st.container(height=PANEL_HEIGHT, border=False):
+        # sin altura fija: al desplegar un aviso (con su mini-mapa, mas grande que antes) se
+        # quiere ver toda la info sin que quede recortada/diminuta dentro de una caja con
+        # scroll interno del tamaño del mapa principal - esta pestaña crece con su contenido
+        # y la pagina hace scroll normal (la pestaña "Lista" si mantiene altura fija, es una
+        # tabla y tiene sentido que se comporte como tal)
+        with st.container(border=False):
             if error_gee:
                 st.info("Sin datos de GEE — no se puede calcular el ranking.")
             elif hotspots is None or hotspots.empty:
@@ -729,7 +773,7 @@ with col_panel:
                             # que este repo no tiene por diseno; se mantiene en la copia interna
                             # ixo-geospacial, con acceso a la BD de produccion
                             m_mini = _mapa_mini_aviso(rancho_row, aviso, hs_cercanos)
-                            st_folium(m_mini, width=None, height=260, returned_objects=[], key=f"mapa_ranking_{aviso['ranch_id']}")
+                            st_folium(m_mini, width=None, height=480, returned_objects=[], key=f"mapa_ranking_{aviso['ranch_id']}")
 
     # ---- LISTA DE GANADERIAS EN RIESGO (mismas que el ranking) ----
     with tab_lista:

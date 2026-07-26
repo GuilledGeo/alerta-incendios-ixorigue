@@ -108,6 +108,14 @@ QUERY_ZONAS = text("""
 """)
 
 
+def _cargar_wkb(b):
+    # psycopg2 devuelve geometry como str hex o memoryview segun el driver/version
+    geom = wkb.loads(b, hex=True) if isinstance(b, str) else wkb.loads(bytes(b))
+    # algunas Zones.Polygon dibujadas a mano son topologicamente invalidas
+    # (autointersecciones) - buffer(0) las repara sin cambiar la forma visible
+    return geom if geom.is_valid else geom.buffer(0)
+
+
 def obtener_ranchos_es() -> gpd.GeoDataFrame:
     """Punto de entrada publico: segun config.RANCHOS_DATA_SOURCE, consulta la BD de produccion
     en vivo ("db", uso local con credenciales) o lee un snapshot local generado de antemano con
@@ -183,13 +191,6 @@ def _obtener_ranchos_db() -> gpd.GeoDataFrame:
     df_ranchos["tipo_ganaderia"] = df_ranchos["ranch_id"].map(tipo_por_rancho).fillna("Sin especificar")
     df_ranchos["region"] = df_ranchos["region"].apply(_normalizar_ccaa)
 
-    def _cargar_wkb(b):
-        # psycopg2 devuelve geometry como str hex o memoryview segun el driver/version
-        geom = wkb.loads(b, hex=True) if isinstance(b, str) else wkb.loads(bytes(b))
-        # algunas Zones.Polygon dibujadas a mano son topologicamente invalidas
-        # (autointersecciones) - buffer(0) las repara sin cambiar la forma visible
-        return geom if geom.is_valid else geom.buffer(0)
-
     df_zonas["geom"] = df_zonas["polygon_wkb"].apply(_cargar_wkb)
 
     perimetros = (
@@ -223,6 +224,41 @@ def _obtener_ranchos_db() -> gpd.GeoDataFrame:
     df_ranchos["zonas_nombres"] = ids.map(nombres_union).fillna("")
 
     return gpd.GeoDataFrame(df_ranchos, geometry="geometry", crs="EPSG:4326")
+
+
+def obtener_zonas_es() -> gpd.GeoDataFrame | None:
+    """Zonas/parcelas individuales (SIN fusionar) de los ranchos activos ES: una fila por
+    zona, con su propio `zone_name` y geometria. La columna "geometry" de obtener_ranchos_es()
+    fusiona todas las zonas de un rancho en un unico poligono (para poder medir distancias) -
+    eso hace que al pasar el cursor por cualquier parte de un rancho con varias parcelas
+    dispersas, el tooltip sea siempre el mismo y no se pueda saber que parcela es cada una.
+    Esta funcion existe para que el mapa pueda dibujar cada parcela por separado con su nombre.
+
+    Devuelve None si no hay datos disponibles (snapshot antiguo generado antes de incluir esta
+    capa, o sin acceso a BD) - la UI debe tratarlo como "no se puede diferenciar por zona" y
+    caer al comportamiento anterior (una sola forma fusionada por rancho), no como un error.
+    """
+    if RANCHOS_DATA_SOURCE == "snapshot":
+        if not RANCHOS_SNAPSHOT_PATH.exists():
+            return None
+        try:
+            return gpd.read_file(RANCHOS_SNAPSHOT_PATH, layer="zonas")
+        except Exception:
+            return None  # snapshot generado antes de exportar la capa "zonas"
+
+    try:
+        sys.path.insert(0, str(REPO_ROOT))
+        from db_connection import get_engine  # noqa: E402
+    except ModuleNotFoundError:
+        return None
+
+    engine = get_engine()
+    with engine.connect() as conn:
+        df_zonas = pd.read_sql(QUERY_ZONAS, conn)
+    df_zonas["geometry"] = df_zonas["polygon_wkb"].apply(_cargar_wkb)
+    return gpd.GeoDataFrame(
+        df_zonas[["ranch_id", "zone_name", "is_perimeter", "geometry"]], geometry="geometry", crs="EPSG:4326",
+    )
 
 # nota: obtener_ultimas_posiciones() (ultima posicion GPS de los animales por rancho, via
 # LocationsHistory) se quito de este repo publico - requiere BD en vivo, que este repo no
