@@ -159,6 +159,17 @@ st.markdown(f"""
     div[data-testid="stVerticalBlockBorderWrapper"] > div > div[data-testid="stVerticalBlock"] {{
         gap: 0.4rem;
     }}
+
+    /* mapa de España (columna izquierda) fijo en pantalla al hacer scroll - el panel derecho
+    (ranking/lista, que puede crecer mucho con los avisos desplegados) hace scroll normal de
+    pagina, pero el mapa se queda anclado en vista en vez de desaparecer hacia arriba. El ancla
+    invisible .ix-map-sticky-anchor (primer elemento dentro de la columna del mapa) permite
+    seleccionar SOLO esa columna con :has(), sin afectar a las demas columnas de la pagina */
+    div[data-testid="stColumn"]:has(> div .ix-map-sticky-anchor) {{
+        position: sticky;
+        top: 0.6rem;
+        align-self: flex-start;
+    }}
 </style>
 """, unsafe_allow_html=True)
 
@@ -591,6 +602,7 @@ if "foco_ranch_id" not in st.session_state:
     st.session_state["foco_ranch_id"] = None
 
 with col_mapa:
+    st.markdown('<div class="ix-map-sticky-anchor"></div>', unsafe_allow_html=True)
     foco_id = st.session_state["foco_ranch_id"]
 
     col_titulo_mapa, col_quitar_foco = st.columns([5, 1.3])
@@ -621,9 +633,12 @@ with col_mapa:
     if foco_id is not None and foco_id in set(ranchos["ranch_id"]):
         rancho_foco = ranchos.loc[ranchos["ranch_id"] == foco_id].iloc[0]
         centro = [rancho_foco["lat"], rancho_foco["lon"]]
-        zoom = 13
         resaltar = {foco_id}
-        m = _mapa_principal(ranchos, hotspots, resaltar_ids=resaltar, centro=centro, zoom=zoom, zonas_df=zonas)
+        m = _mapa_principal(ranchos, hotspots, resaltar_ids=resaltar, centro=centro, zoom=13, zonas_df=zonas)
+        # encuadre a la extension REAL de la geometria del rancho (no solo su centro con un zoom
+        # fijo) - una finca grande o alargada se ve completa, no solo recortada por el zoom 13
+        minx, miny, maxx, maxy = rancho_foco["geometry"].bounds
+        m.fit_bounds([[miny, minx], [maxy, maxx]], padding=(40, 40))
         st_folium(m, width=None, height=MAP_HEIGHT, returned_objects=[], key="mapa_general")
     elif ranchos_filtrados.empty:
         st.warning("Ningún rancho coincide con los filtros.")
@@ -769,7 +784,18 @@ with col_panel:
                         rancho_row = ranchos.loc[ranchos["ranch_id"] == aviso["ranch_id"]].iloc[0]
                         hs_cercanos = _hotspots_cercanos_de(rancho_row, hotspots)
 
-                        col_mapa_btn, col_pdf_btn = st.columns(2)
+                        col_centrar_btn, col_mapa_btn, col_pdf_btn = st.columns(3)
+
+                        # mismo mecanismo que el boton "🎯 Ver en mapa" de la cabecera del aviso
+                        # (session_state["foco_ranch_id"]) - se repite aqui, junto al resto de
+                        # botones de abajo, para no tener que volver a subir al principio de la
+                        # tarjeta tras haberla desplegado y leido
+                        with col_centrar_btn:
+                            if st.button(
+                                "🔎 Centrar vista mapa", key=f"centrar_btn_{aviso['ranch_id']}", width="stretch",
+                            ):
+                                st.session_state["foco_ranch_id"] = aviso["ranch_id"]
+                                st.rerun()
 
                         # el mini-mapa es lo mas caro de este bloque (construye un Folium
                         # completo) - solo se genera bajo peticion explicita de este boton, no
