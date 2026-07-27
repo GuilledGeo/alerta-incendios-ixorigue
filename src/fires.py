@@ -159,3 +159,20 @@ def formatear_duracion(horas: float) -> str:
     if horas < 48:
         return f"{horas:.0f} h"
     return f"{horas / 24:.1f} días"
+
+
+def formatear_hace(momento: pd.Timestamp) -> str:
+    """'hace X h Y min' (o solo minutos si es menos de 1h) desde `momento` hasta ahora - para
+    que el lector del informe PDF sepa de un vistazo la antiguedad real de una fecha/hora
+    absoluta sin tener que restar mentalmente contra la hora de generacion del informe."""
+    if pd.isna(momento):
+        return ""
+    delta_h = (pd.Timestamp.now(tz="UTC") - momento).total_seconds() / 3600.0
+    if delta_h < 0:
+        return "hace instantes"
+    horas, minutos = divmod(int(round(delta_h * 60)), 60)
+    if horas == 0:
+        return f"hace {minutos} min"
+    if minutos == 0:
+        return f"hace {horas} h"
+    return f"hace {horas} h {minutos} min"

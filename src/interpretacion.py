@@ -8,6 +8,7 @@ import math
 
 import pandas as pd
 
+from .fires import formatear_hace
 from .geo_utils import bearing_deg
 
 
@@ -29,8 +30,8 @@ def interpretar_riesgo(aviso_row, hotspots_mismo_fuego: pd.DataFrame | None = No
             partes.append(
                 f"Aunque el foco más cercano a su finca lleva un tiempo sin nueva actividad, "
                 f"este mismo incendio sigue registrando detecciones más recientes en otros "
-                f"puntos (la última, a fecha de {ts}): el incendio en su conjunto sigue activo, "
-                f"no está controlado."
+                f"puntos (la última, a fecha de {ts}, {formatear_hace(ultima_deteccion_fuego)}): "
+                f"el incendio en su conjunto sigue activo, no está controlado."
             )
 
     partes.append(

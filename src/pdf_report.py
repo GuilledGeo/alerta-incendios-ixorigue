@@ -46,6 +46,7 @@ import matplotlib.lines as mlines
 import matplotlib.patches as mpatches
 
 from .config import HOTSPOT_AGE_BINS_H, HOTSPOT_AGE_COLORS, RING_THRESHOLDS_KM
+from .fires import formatear_hace
 from .geo_utils import bearing_deg
 from .interpretacion import detectar_rodeado, interpretar_riesgo, interpretar_viento
 from .risk import (
@@ -272,7 +273,20 @@ def _mapa_anillos(rancho_row, hotspots_cercanos, aviso_row) -> BytesIO:
     _preparar_ejes_mapa(ax, geoms_extent, padding_frac=0.08)
     _flecha_norte(ax)
     _etiqueta_zona(ax, rancho_row, centroide_3857)
-    ax.set_title("Zonas de seguridad (anillos de 3/5/10 km) — imagen de satélite (Esri World Imagery)", fontsize=10, pad=10)
+
+    # foco mas reciente DENTRO del anillo de 10km (o el que dispara el aviso si no hay ninguno
+    # dentro) - fecha/hora + "hace X h Y min" como subtitulo, para saber de un vistazo la
+    # antiguedad real del dato sin tener que ir a buscarla en el texto de mas abajo
+    if hotspots_dentro is not None and not hotspots_dentro.empty:
+        foco_mas_reciente = hotspots_dentro["acq_datetime"].max()
+    else:
+        foco_mas_reciente = aviso_row["acq_datetime"]
+    ts_reciente = foco_mas_reciente.tz_convert("Europe/Madrid").strftime("%d/%m %H:%M %Z")
+    ax.set_title(
+        "Zonas de seguridad (anillos de 3/5/10 km) — imagen de satélite (Esri World Imagery)\n"
+        f"Foco más reciente en la zona: {ts_reciente} ({formatear_hace(foco_mas_reciente)})",
+        fontsize=10, pad=10,
+    )
 
     handles = [
         mpatches.Patch(facecolor="#ffd166", alpha=0.4, edgecolor="#7c1d0f", label="Perímetro de la finca"),
@@ -657,7 +671,7 @@ def generar_pdf_aviso(
     story.append(_linea())
     story.append(Paragraph("Situación", estilo_subtitulo))
     if imagen_mapa_general is not None:
-        imagen_general_flow = Image(imagen_mapa_general, width=16 * cm, height=16 * cm, kind="proportional")
+        imagen_general_flow = Image(imagen_mapa_general, width=doc.width, height=doc.width, kind="proportional")
         imagen_general_flow.hAlign = "CENTER"
         story.append(KeepTogether([
             Paragraph("<i>Vista general: la finca y todos los focos detectados en la zona.</i>", estilo_matiz),

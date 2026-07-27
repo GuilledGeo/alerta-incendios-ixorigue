@@ -3,7 +3,7 @@ import pandas as pd
 from shapely.geometry import Point, box
 
 from .config import CARDINAL_ES, RING_RISK, RING_THRESHOLDS_KM
-from .fires import formatear_duracion
+from .fires import formatear_duracion, formatear_hace
 from .geo_utils import bearing_deg, bearing_to_cardinal
 
 CRS_METRICO = "EPSG:3857"  # suficiente para distancias cortas (<50 km) sin distorsion relevante
@@ -53,8 +53,11 @@ def anillos_riesgo(rancho_geom):
 
 # aspect_ratio (ancho/alto) del mapa "vista general" del informe PDF (src/pdf_report.py) - vive
 # aqui (no en pdf_report.py) para que bbox_vista_general() pueda usar exactamente el mismo valor
-# al calcular que hotspots caen dentro del area visible de ese mapa, sin duplicar la constante
-MAPA_GENERAL_ASPECT = 2.2
+# al calcular que hotspots caen dentro del area visible de ese mapa, sin duplicar la constante.
+# Bajado de 2.2 a 1.7 (mas cuadrado) para que el mapa se vea mas grande/prominente al insertarse
+# a todo el ancho de la pagina - con 2.2 quedaba muy achatado (poca altura) aunque ocupara el
+# ancho completo.
+MAPA_GENERAL_ASPECT = 1.7
 
 
 def bbox_vista_general(rancho_geom, aspect_ratio: float = MAPA_GENERAL_ASPECT, padding_frac: float = 0.08):
@@ -182,7 +185,7 @@ def evaluar_riesgo(ranchos: gpd.GeoDataFrame, hotspots: pd.DataFrame) -> pd.Data
         frase_ultima = ""
         if pd.notna(ultima_deteccion) and ultima_deteccion != hs["acq_datetime"]:
             ultima_local = ultima_deteccion.tz_convert("Europe/Madrid").strftime("%Y-%m-%d %H:%M %Z")
-            frase_ultima = f" Última actualización del foco: {ultima_local}."
+            frase_ultima = f" Última actualización del foco: {ultima_local} ({formatear_hace(ultima_deteccion)})."
         frase_avance = ""
         if avance_confiable and direccion_avance_es and pd.notna(velocidad_kmh):
             frase_avance = (
@@ -192,7 +195,8 @@ def evaluar_riesgo(ranchos: gpd.GeoDataFrame, hotspots: pd.DataFrame) -> pd.Data
             )
 
         mensaje = (
-            f"Detectado posible incendio (punto caliente) a fecha de {ts_local}"
+            f"Detectado posible incendio (punto caliente) a fecha de {ts_local} "
+            f"({formatear_hace(hs['acq_datetime'])})"
             f"{frase_lugar}, a {dist_km:.1f} km de su posición, dirección {CARDINAL_ES[cardinal]}."
             f"{frase_duracion}{frase_ultima}{frase_avance} Esté alerta de su evolución. "
             f"Actualmente se encuentra en riesgo {riesgo} respecto a su finca."
