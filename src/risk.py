@@ -12,20 +12,21 @@ CRS_METRICO = "EPSG:3857"  # suficiente para distancias cortas (<50 km) sin dist
 # que siguen activos de los que probablemente ya estan controlados/extinguidos - compartido
 # entre app.py (badge del ranking) y src/pdf_report.py (informe PDF).
 #
-# 12h/24h (antes 24h/36h): con src/firms_api.py como fuente preferente (latencia <3h, ver
-# investigacion de 2026-07-27) cada pasada de satelite llega a la app casi de inmediato, asi que
-# ya no hace falta el margen extra que antes absorbia el retraso del espejo de Earth Engine
-# (24-40h observado). Los umbrales ahora reflejan la cadencia real de pasadas sobre España -
-# VIIRS NOAA-20 + SNPP + MODIS combinados pasan aprox. cada 3-6h - no la latencia de nuestro
-# propio pipeline: si no hay ninguna deteccion nueva en 24h habiendo tenido varias oportunidades
-# de pasada de por medio, es una señal bastante mas fiable de que el foco ya no esta activo.
-ESTADO_FOCO_ACTIVO_H = 12
-ESTADO_FOCO_CONTROLADO_H = 24
+# 24h/48h: deliberadamente los MISMOS cortes que ya usa la leyenda de antiguedad de los hotspots
+# en el mapa (config.HOTSPOT_AGE_BINS_H = [6, 12, 24, 48, 72] - un punto pasa de naranja
+# "12-24h" a amarillo "24-48h" justo en las 24h, y de amarillo a verde "48-72h" justo en las
+# 48h). Antes este modulo tenia su propia escala independiente (24h/36h, luego 12h/24h en un
+# primer intento) que no coincidia con ninguno de esos cortes del mapa - resultaba en que el
+# color del punto y el estado del foco cambiaban en momentos distintos sin motivo, confuso para
+# quien mira ambos a la vez. Usar los mismos cortes que el mapa es lo que de verdad da
+# coherencia, no un numero concreto en si mismo.
+ESTADO_FOCO_ACTIVO_H = 24
+ESTADO_FOCO_CONTROLADO_H = 48
 
 
 def estado_foco(ultima_deteccion) -> tuple[str, str, str]:
     """(emoji+label, color, texto corto) segun antiguedad de la ultima deteccion del foco:
-    <12h = activo, 12-24h = en seguimiento (zona gris entre ambos umbrales), >=24h = controlado."""
+    <24h = activo, 24-48h = en seguimiento (zona gris entre ambos umbrales), >=48h = controlado."""
     if pd.isna(ultima_deteccion):
         return "", "#6b7280", ""
     horas = (pd.Timestamp.now(tz="UTC") - ultima_deteccion).total_seconds() / 3600.0

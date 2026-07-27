@@ -44,7 +44,7 @@ from reportlab.platypus import (
 import matplotlib.lines as mlines
 import matplotlib.patches as mpatches
 
-from .config import HOTSPOT_AGE_BINS_H, HOTSPOT_AGE_COLORS, RING_THRESHOLDS_KM, WINDOW_HOURS_DEFAULT
+from .config import HOTSPOT_AGE_BINS_H, HOTSPOT_AGE_COLORS, RING_THRESHOLDS_KM
 from .geo_utils import bearing_deg
 from .interpretacion import detectar_rodeado, interpretar_riesgo, interpretar_viento
 from .risk import (
@@ -433,7 +433,12 @@ def generar_pdf_aviso(
 
     try:
         meteo_24h = obtener_meteo_reciente(centroide.y, centroide.x, horas=24)
-    except Exception:
+    except Exception as e:
+        # obtener_meteo_reciente() ya reintenta 3 veces ante fallos transitorios de red - si
+        # aun asi falla, mejor dejar rastro en los logs del servidor que tragarselo en
+        # silencio, un informe para cliente sin datos meteorologicos es dificil de diagnosticar
+        # a posteriori sin saber que paso realmente aqui
+        print(f"[pdf_report] fallo obteniendo meteo para ({centroide.y}, {centroide.x}): {type(e).__name__}: {e}")
         meteo_24h = None
     hay_meteo_24h = meteo_24h is not None and not meteo_24h.empty
     # las ultimas 6h (radar de viento, tabla de KPIs) son un subconjunto de las 24h ya pedidas -

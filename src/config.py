@@ -47,7 +47,10 @@ CARDINAL_ES = {
 # color de cada hotspot en el mapa segun su antiguedad (horas desde la deteccion): morado (recien
 # detectado, foco mas caliente/urgente) -> rojo -> naranja -> amarillo -> verde oliva apagado ->
 # gris (deteccion muy antigua dentro de la ventana consultada, probablemente ya extinguido) - mas
-# umbrales pasadas las 24h porque la ventana de consulta llega hasta 168h (7 dias)
+# umbrales pasadas las 24h porque la ventana de consulta llega hasta 168h (7 dias).
+# Los cortes en 24h y 48h se reutilizan tal cual en src/risk.py (ESTADO_FOCO_ACTIVO_H/
+# CONTROLADO_H) para que el color del punto en el mapa y el estado del foco (Activo/En
+# seguimiento/Controlado) cambien exactamente a la vez - si tocas estos umbrales, revisa risk.py.
 HOTSPOT_AGE_BINS_H = [6, 12, 24, 48, 72]
 HOTSPOT_AGE_COLORS = {
     "≤6h": "#a21caf",
