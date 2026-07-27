@@ -583,33 +583,52 @@ def generar_pdf_aviso(
     ))
 
     # --- que es este sistema (contexto para un lector no tecnico que recibe el PDF sin haber
-    # visto nunca el panel) ---
+    # visto nunca el panel) - bloque compacto: un parrafo corto + una leyenda visual de colores
+    # para el estado del foco, en vez de 3 parrafos de texto gris apilados (poco escaneable para
+    # alguien sin conocimientos de teledeteccion/incendios). El aviso de latencia se actualiza
+    # para reflejar que ahora se usa FIRMS API directa (<3h, ver src/firms_api.py) como fuente
+    # preferente en vez de solo el espejo de Earth Engine (24-40h observado) ---
     story.append(Spacer(1, 0.15 * cm))
     story.append(Paragraph(
-        f"<b>¿Qué es este informe?</b> Desde Ixorigue hemos puesto en marcha una campaña de "
-        f"prevención y seguimiento de incendios para nuestros clientes: vigilamos de forma "
-        f"automática los focos de calor detectados por satélite en un radio amplio alrededor de "
-        f"sus fincas, y le avisamos cuando alguno se acerca. Se usa una ventana de las últimas "
-        f"{WINDOW_HOURS_DEFAULT} horas: cada foco se clasifica en tres <b>anillos de seguridad</b> "
-        f"según su distancia al perímetro de la finca — <b>0-3&nbsp;km</b> (riesgo máximo), "
-        f"<b>3-5&nbsp;km</b> (riesgo alto) y <b>5-10&nbsp;km</b> (vigilancia) — que son los "
-        f"círculos discontinuos del segundo mapa de este informe.", estilo_matiz,
+        f"<b>¿Qué es este informe?</b> Ixorigue vigila de forma automática los focos de calor "
+        f"detectados por satélite (NASA) alrededor de sus fincas, y le avisa cuando alguno se "
+        f"acerca. Cada foco se clasifica en tres <b>anillos de seguridad</b> según su distancia "
+        f"al perímetro de la finca — <b>0-3&nbsp;km</b> (riesgo máximo), <b>3-5&nbsp;km</b> "
+        f"(riesgo alto) y <b>5-10&nbsp;km</b> (vigilancia) — visibles como círculos discontinuos "
+        f"en el segundo mapa de este informe. Los datos se actualizan varias veces al día a "
+        f"partir de los satélites VIIRS y MODIS: no es una cámara en directo, pero sí una de las "
+        f"fuentes más rápidas y fiables que existen para esto.", estilo_matiz,
     ))
+    story.append(Spacer(1, 0.18 * cm))
+
+    estilo_leyenda_estado = ParagraphStyle(
+        "leyenda_estado_es", parent=estilo_normal, fontSize=8.3, leading=11,
+        textColor=rl_colors.white, fontName="Helvetica-Bold", alignment=1, spaceAfter=0,
+    )
+    badges_estado = [
+        ("Activo", f"detectado hace &lt;{ESTADO_FOCO_ACTIVO_H}h", "#ef4444"),
+        ("En seguimiento", f"{ESTADO_FOCO_ACTIVO_H}-{ESTADO_FOCO_CONTROLADO_H}h sin detección", "#eab308"),
+        ("Controlado / extinto", f"&gt;{ESTADO_FOCO_CONTROLADO_H}h sin detección", "#22c55e"),
+    ]
+    tabla_estado = Table(
+        [[Paragraph(f"{nombre}<br/><font size=6.5>{detalle}</font>", estilo_leyenda_estado)
+          for nombre, detalle, _ in badges_estado]],
+        colWidths=[doc.width / 3] * 3,
+    )
+    tabla_estado.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (0, 0), rl_colors.HexColor(badges_estado[0][2])),
+        ("BACKGROUND", (1, 0), (1, 0), rl_colors.HexColor(badges_estado[1][2])),
+        ("BACKGROUND", (2, 0), (2, 0), rl_colors.HexColor(badges_estado[2][2])),
+        ("TOPPADDING", (0, 0), (-1, -1), 6),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+    ]))
+    story.append(Paragraph("<b>Estado del foco</b> (campo de la tabla de arriba y de los mapas):", estilo_matiz))
+    story.append(Spacer(1, 0.08 * cm))
+    story.append(tabla_estado)
     story.append(Paragraph(
-        "<i>Importante: esto no es una cámara en directo. Los satélites que usamos captan "
-        "información varias veces al día, según las pasadas que hacen sobre la zona - no de "
-        "forma continua. Puede haber cambios reales en el terreno que aún no se reflejen en el "
-        "último dato disponible en este informe.</i>", estilo_matiz,
-    ))
-    story.append(Paragraph(
-        "<b>Estado del foco:</b> <i>Activo</i> = detectado hace menos de "
-        f"{ESTADO_FOCO_ACTIVO_H} horas, el fuego sigue registrando actividad. "
-        f"<i>En seguimiento</i> = entre {ESTADO_FOCO_ACTIVO_H} y {ESTADO_FOCO_CONTROLADO_H} "
-        "horas sin nueva detección, aún es pronto para descartar actividad. "
-        f"<i>Controlado/extinto</i> = más de {ESTADO_FOCO_CONTROLADO_H} horas sin nueva "
-        "detección: lo más probable es que esté controlado o ya extinto, aunque los focos "
-        "catalogados así pueden reactivarse si las condiciones lo favorecen.",
-        estilo_matiz,
+        "<i>Un foco \"Controlado/extinto\" puede reactivarse si las condiciones lo favorecen — "
+        "no equivale a que el peligro haya desaparecido del todo.</i>", estilo_matiz,
     ))
 
     # --- mapas ---

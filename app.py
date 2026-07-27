@@ -86,8 +86,8 @@ RISK_BADGE = {
 ORDEN_RIESGO = {"3/3": 0, "2/3": 1, "1/3": 2}
 # desempate por urgencia temporal dentro de cada nivel de riesgo: con datos frescos (FIRMS API
 # directa, <3h de latencia - ver src/firms_api.py) ya se puede distinguir de verdad un foco
-# "Activo" ahora mismo de uno "Controlado" hace mas de 36h, asi que dentro del mismo nivel de
-# riesgo interesa ver antes el que sigue activo, no solo el mas cercano
+# "Activo" ahora mismo de uno "Controlado" (ver umbrales en src/risk.py), asi que dentro del
+# mismo nivel de riesgo interesa ver antes el que sigue activo, no solo el mas cercano
 ORDEN_URGENCIA = {"Activo": 0, "En seguimiento": 1, "Controlado": 2}
 
 
@@ -543,11 +543,16 @@ en este orden de preferencia:
 Los ranchos sin ninguna zona dibujada (solo un punto de ubicación) no se muestran en este panel.
 
 **Detección de incendios** — se consultan puntos calientes (hotspots) de los satélites VIIRS
-(NOAA-20/SNPP) y FIRMS vía Google Earth Engine, dentro de una ventana fija de {WINDOW_HOURS_DEFAULT}h
-hacia atrás (ampliarla más solo añade hotspots ya extinguidos, ver aviso más abajo). Los hotspots
-cercanos en espacio y tiempo se agrupan en "incendios" para no repetir el mismo fuego muchas veces.
-Se descartan los incendios geocodificados fuera de España (el margen de +20 km del área de
-consulta capta a veces incendios reales de Marruecos, Argelia, Portugal o Francia).
+(NOAA-20/SNPP) y MODIS, dentro de una ventana fija de {WINDOW_HOURS_DEFAULT}h hacia atrás
+(ampliarla más solo añade hotspots ya extinguidos, ver aviso más abajo). Fuente de datos: la
+**Area API directa de NASA FIRMS** (latencia &lt;3h) siempre que haya una `FIRMS_MAP_KEY`
+configurada; si falta o falla, se cae automáticamente a un espejo de las mismas colecciones en
+**Google Earth Engine** (latencia observada de 24-40h — mucho más lento, se usa solo como
+respaldo). El caption bajo los KPIs indica de cuál de las dos viene el dato mostrado.
+Los hotspots cercanos en espacio y tiempo se agrupan en "incendios" para no repetir el mismo
+fuego muchas veces. Se descartan los incendios geocodificados fuera de España (el margen de
++20 km del área de consulta capta a veces incendios reales de Marruecos, Argelia, Portugal o
+Francia).
 
 Cada punto del mapa se colorea según su antigüedad (morado = recién detectado, virando a rojo,
 naranja, amarillo, verde oliva y finalmente gris — probablemente ya extinguido — cuanto más
@@ -556,10 +561,12 @@ antigua es la detección dentro de la ventana consultada).
 **⚠️ No es monitorización continua** — estos satélites son de órbita polar y solo sobrevuelan cada
 punto de España unas pocas veces al día:
 - VIIRS NOAA-20 y VIIRS SNPP: ~2 pasadas/día cada uno (una diurna, una nocturna).
-- FIRMS: agrega además detecciones de MODIS (Terra/Aqua), con nuevas imágenes cada ~3h de latencia.
+- MODIS (Terra/Aqua): pasadas adicionales, ~2/día combinadas.
 
 En total, un rancho puede recibir como mucho **6-8 actualizaciones de datos al día**, repartidas de
-forma irregular. Además, como FIRMS ya incluye detecciones de VIIRS internamente, un mismo foco
+forma irregular — pero con FIRMS API directa, cada una de esas pasadas llega a la app en menos de
+3h desde que el satélite la capta (con el respaldo de Earth Engine, ese mismo dato puede tardar
+24-40h en aparecer). Además, como los hotspots pueden proceder de varias fuentes, un mismo foco
 real puede aparecer duplicado con `source` distinto.
 
 **Nivel de riesgo por rancho** — para cada hotspot se calcula la distancia al perímetro del rancho
@@ -775,7 +782,10 @@ with col_panel:
                         with col_titulo_aviso:
                             st.markdown(titulo, unsafe_allow_html=True)
                         with col_boton_foco:
-                            if st.button("🎯 Ver en mapa", key=f"foco_btn_{aviso['ranch_id']}", width="stretch"):
+                            if st.button(
+                                "🔎 Centrar mapa general", key=f"foco_btn_{aviso['ranch_id']}", width="stretch",
+                                help="Centra y hace zoom en el MAPA GRANDE de la izquierda sobre esta finca (no genera nada nuevo, solo mueve la vista).",
+                            ):
                                 st.session_state["foco_ranch_id"] = aviso["ranch_id"]
                                 st.rerun()
                         st.write("")
@@ -822,13 +832,19 @@ with col_panel:
 
                         col_centrar_btn, col_mapa_btn, col_pdf_btn = st.columns(3)
 
-                        # mismo mecanismo que el boton "🎯 Ver en mapa" de la cabecera del aviso
-                        # (session_state["foco_ranch_id"]) - se repite aqui, junto al resto de
-                        # botones de abajo, para no tener que volver a subir al principio de la
-                        # tarjeta tras haberla desplegado y leido
+                        # mismo mecanismo que el boton "🔎 Centrar mapa general" de la cabecera
+                        # del aviso (session_state["foco_ranch_id"]) - se repite aqui, junto al
+                        # resto de botones de abajo, para no tener que volver a subir al
+                        # principio de la tarjeta tras haberla desplegado y leido. Texto/help
+                        # deliberadamente distintos de los del mini-mapa de abajo (mismo icono
+                        # de lupa pero "mapa GENERAL" vs "mapa del INCENDIO") - son dos mapas
+                        # distintos y antes se llamaban de forma casi identica ("Ver en mapa" /
+                        # "Centrar vista mapa" / "Mostrar mapa"), facil de confundir para alguien
+                        # que no conoce ya la app
                         with col_centrar_btn:
                             if st.button(
-                                "🔎 Centrar vista mapa", key=f"centrar_btn_{aviso['ranch_id']}", width="stretch",
+                                "🔎 Centrar mapa general", key=f"centrar_btn_{aviso['ranch_id']}", width="stretch",
+                                help="Centra y hace zoom en el MAPA GRANDE de la izquierda sobre esta finca (no genera nada nuevo, solo mueve la vista).",
                             ):
                                 st.session_state["foco_ranch_id"] = aviso["ranch_id"]
                                 st.rerun()
@@ -844,8 +860,9 @@ with col_panel:
                         mostrar_mapa = st.session_state[key_mapa_visible]
                         with col_mapa_btn:
                             if st.button(
-                                "🗺️ Ocultar mapa" if mostrar_mapa else "🗺️ Mostrar mapa",
+                                "🔥 Ocultar mapa del incendio" if mostrar_mapa else "🔥 Ver mapa del incendio",
                                 key=f"toggle_mapa_{aviso['ranch_id']}", width="stretch",
+                                help="Genera un mapa APARTE, de cerca, solo de este incendio: anillos de seguridad y focos cercanos a la finca.",
                             ):
                                 st.session_state[key_mapa_visible] = not mostrar_mapa
                                 st.rerun()

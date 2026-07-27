@@ -10,14 +10,22 @@ CRS_METRICO = "EPSG:3857"  # suficiente para distancias cortas (<50 km) sin dist
 
 # umbrales (horas desde la ultima deteccion satelital del foco) para diferenciar los avisos
 # que siguen activos de los que probablemente ya estan controlados/extinguidos - compartido
-# entre app.py (badge del ranking) y src/pdf_report.py (informe PDF)
-ESTADO_FOCO_ACTIVO_H = 24
-ESTADO_FOCO_CONTROLADO_H = 36
+# entre app.py (badge del ranking) y src/pdf_report.py (informe PDF).
+#
+# 12h/24h (antes 24h/36h): con src/firms_api.py como fuente preferente (latencia <3h, ver
+# investigacion de 2026-07-27) cada pasada de satelite llega a la app casi de inmediato, asi que
+# ya no hace falta el margen extra que antes absorbia el retraso del espejo de Earth Engine
+# (24-40h observado). Los umbrales ahora reflejan la cadencia real de pasadas sobre España -
+# VIIRS NOAA-20 + SNPP + MODIS combinados pasan aprox. cada 3-6h - no la latencia de nuestro
+# propio pipeline: si no hay ninguna deteccion nueva en 24h habiendo tenido varias oportunidades
+# de pasada de por medio, es una señal bastante mas fiable de que el foco ya no esta activo.
+ESTADO_FOCO_ACTIVO_H = 12
+ESTADO_FOCO_CONTROLADO_H = 24
 
 
 def estado_foco(ultima_deteccion) -> tuple[str, str, str]:
     """(emoji+label, color, texto corto) segun antiguedad de la ultima deteccion del foco:
-    <24h = activo, 24-36h = en seguimiento (zona gris entre ambos umbrales), >=36h = controlado."""
+    <12h = activo, 12-24h = en seguimiento (zona gris entre ambos umbrales), >=24h = controlado."""
     if pd.isna(ultima_deteccion):
         return "", "#6b7280", ""
     horas = (pd.Timestamp.now(tz="UTC") - ultima_deteccion).total_seconds() / 3600.0
