@@ -72,9 +72,21 @@ def _hotspots_de_fuente(source: str, collection_id: str, scale: int,
                          region: "ee.Geometry", start: "ee.Date", end: "ee.Date",
                          limite: int) -> pd.DataFrame | None:
     pts = _puntos_de_coleccion(collection_id, scale, region, start, end)
+    # ImageCollection.map().flatten() conserva el orden cronologico ASCENDENTE de la coleccion
+    # (mas antiguo primero) - en dias de mucha actividad (>limite puntos en la ventana), el
+    # .limit() de abajo se quedaba con los puntos MAS ANTIGUOS y descartaba justo las detecciones
+    # mas recientes, las que mas importan para saber si un incendio sigue activo ahora mismo.
+    # Se ordena por fecha descendente ANTES de truncar para que, si hay que perder puntos, se
+    # pierdan los mas viejos.
+    pts = pts.sort("acq_millis", False)
     try:
         info = pts.limit(limite).getInfo()
-    except Exception:
+    except Exception as e:
+        # antes se tragaba cualquier error en silencio (una fuente entera desaparecia del
+        # ranking sin ningun aviso) - un print aqui al menos deja rastro en los logs del
+        # servidor si GEE vuelve a fallar (p.ej. si algun dia se supera de nuevo el limite de
+        # 5000 elementos al ordenar, ver comentario en obtener_hotspots_gee)
+        print(f"[gee_hotspots] fallo consultando {source} ({collection_id}): {type(e).__name__}: {e}")
         return None
     feats = info.get("features", [])
     if not feats:
@@ -96,10 +108,20 @@ def _hotspots_de_fuente(source: str, collection_id: str, scale: int,
 
 def obtener_hotspots_gee(bbox: tuple[float, float, float, float],
                           window_hours: int = WINDOW_HOURS_DEFAULT,
-                          limite_por_fuente: int = 2000) -> pd.DataFrame:
+                          limite_por_fuente: int = 4000) -> pd.DataFrame:
     """bbox = (west, south, east, north). Devuelve hotspots de las ultimas `window_hours`
     horas dentro de bbox, combinando VIIRS NOAA-20 + SNPP + FIRMS (equivalente Python del
-    script GEE original, sin pasar por la interfaz de Code Editor)."""
+    script GEE original, sin pasar por la interfaz de Code Editor).
+
+    `limite_por_fuente` (por fuente, no total) se subio de 2000 a 4000: en dias de mucha
+    actividad de incendios en España, una sola fuente (VIIRS) puede superar los 2000 puntos en
+    72h, y aunque _hotspots_de_fuente() ya ordena por fecha descendente antes de truncar (para
+    no perder las detecciones mas recientes), un limite demasiado bajo seguia cortando antes de
+    llegar a las ultimas horas si esas ultimas horas por si solas ya superaban el limite. No
+    subir de ~4500: Earth Engine aborta con EEException ("Collection query aborted after
+    accumulating over 5000 elements") si sort()+limit() necesita acumular mas de 5000 elementos
+    para poder ordenar - probado empiricamente, ver src/gee_hotspots.py commit que introduce
+    este comentario."""
     _init()
     west, south, east, north = bbox
     region = ee.Geometry.Rectangle([west, south, east, north])
