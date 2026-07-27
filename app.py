@@ -38,7 +38,7 @@ from streamlit_folium import st_folium
 try:
     for _clave in (
         "GEE_SERVICE_ACCOUNT_EMAIL", "GEE_SERVICE_ACCOUNT_KEY_JSON",
-        "RANCHOS_DATA_SOURCE", "RANCHOS_SNAPSHOT_PATH",
+        "RANCHOS_DATA_SOURCE", "RANCHOS_SNAPSHOT_PATH", "FIRMS_MAP_KEY",
     ):
         if _clave in st.secrets:
             os.environ[_clave] = str(st.secrets[_clave])
