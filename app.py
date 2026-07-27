@@ -62,6 +62,7 @@ try:
 except Exception:
     pass
 from src.fires import calcular_avance, excluir_paises, formatear_duracion, geocodificar_incendios, identificar_incendios
+from src.firms_api import obtener_hotspots_firms_api
 from src.gee_hotspots import obtener_hotspots_gee
 from src.pdf_report import generar_pdf_aviso
 from src.ranches import obtener_ranchos_es, obtener_zonas_es
@@ -185,8 +186,31 @@ def _cargar_zonas():
 
 
 @st.cache_data(ttl=900, show_spinner="Consultando hotspots en Google Earth Engine...")
-def _cargar_hotspots(bbox, window_hours):
+def _cargar_hotspots_gee(bbox, window_hours):
     return obtener_hotspots_gee(bbox, window_hours), datetime.now(timezone.utc)
+
+
+@st.cache_data(ttl=900, show_spinner="Consultando hotspots (FIRMS API directa)...")
+def _cargar_hotspots_firms(bbox, dias):
+    return obtener_hotspots_firms_api(bbox, dias=dias), datetime.now(timezone.utc)
+
+
+def _cargar_hotspots(bbox, window_hours):
+    """Preferencia FIRMS API directa (latencia <3h documentada por NASA, ver investigacion de
+    2026-07-27) sobre el espejo de Earth Engine (latencia observada de 24-40h - GEE no reingesta
+    las colecciones NRT de NASA LANCE con la misma frecuencia que la fuente original). Si no hay
+    FIRMS_MAP_KEY configurada, o la consulta a FIRMS falla por cualquier motivo (limite de
+    transacciones, MAP_KEY invalida, caida del servicio...), se cae a GEE sin romper la carga de
+    la app - misma logica de "degradar, no romper" que ya se usa en el resto del pipeline."""
+    if os.getenv("FIRMS_MAP_KEY"):
+        dias = min(max(round(window_hours / 24), 1), 5)  # la Area API de FIRMS admite 1-5 dias
+        try:
+            hotspots, fetched_at = _cargar_hotspots_firms(bbox, dias)
+            return hotspots, fetched_at, "FIRMS API directa"
+        except Exception:
+            pass
+    hotspots, fetched_at = _cargar_hotspots_gee(bbox, window_hours)
+    return hotspots, fetched_at, "Google Earth Engine"
 
 
 @st.cache_data(ttl=900, show_spinner="Agrupando y geolocalizando incendios (Nominatim)...")
@@ -571,7 +595,8 @@ with ph_toolbar:
     with c_recargar:
         st.write("")
         if st.button("↻ Recargar hotspots", width="stretch"):
-            _cargar_hotspots.clear()
+            _cargar_hotspots_firms.clear()
+            _cargar_hotspots_gee.clear()
             _procesar_incendios.clear()
     st.markdown('</div>', unsafe_allow_html=True)
 
@@ -582,11 +607,11 @@ hay_filtro = bool(busqueda or regiones_sel)
 # ============================== CARGA DE DATOS (incendios/avisos) ==============================
 
 try:
-    hotspots_crudos, fetched_at = _cargar_hotspots(bbox, window_hours)
+    hotspots_crudos, fetched_at, fuente_hotspots = _cargar_hotspots(bbox, window_hours)
     hotspots, incendios = _procesar_incendios(hotspots_crudos)
     error_gee = None
 except Exception as e:
-    hotspots, incendios, fetched_at = None, None, None
+    hotspots, incendios, fetched_at, fuente_hotspots = None, None, None, None
     error_gee = str(e)
 
 avisos = evaluar_riesgo(ranchos, hotspots) if hotspots is not None and not hotspots.empty else None
@@ -628,7 +653,7 @@ with col_mapa:
         unsafe_allow_html=True,
     )
     if error_gee:
-        st.error(f"No se pudo consultar Google Earth Engine: {error_gee}")
+        st.error(f"No se pudieron consultar hotspots (ni FIRMS API ni Google Earth Engine): {error_gee}")
 
     if foco_id is not None and foco_id in set(ranchos["ranch_id"]):
         rancho_foco = ranchos.loc[ranchos["ranch_id"] == foco_id].iloc[0]
@@ -670,7 +695,7 @@ with ph_kpis:
         st.caption(f"🗂️ Ranchos/clientes: snapshot local del {exportado_en:%Y-%m-%d %H:%M} · los datos de incendio siguen en tiempo real.")
     if fetched_at:
         edad_min = int((datetime.now(timezone.utc) - fetched_at).total_seconds() / 60)
-        st.caption(f"🛰️ Última consulta a GEE: hace {edad_min} min · ventana de {window_hours}h · {n_clientes} clientes activos, {len(ranchos)} ranchos activos.")
+        st.caption(f"🛰️ Última consulta ({fuente_hotspots}): hace {edad_min} min · ventana de {window_hours}h · {n_clientes} clientes activos, {len(ranchos)} ranchos activos.")
 
     k1, k2, k3, k4 = st.columns(4)
     k1.metric(
