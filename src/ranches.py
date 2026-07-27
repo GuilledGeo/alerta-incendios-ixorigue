@@ -146,7 +146,10 @@ def _obtener_ranchos_snapshot() -> gpd.GeoDataFrame:
             f"con acceso a la BD de produccion), y se copia manualmente aqui como "
             f"data/ranchos_snapshot.gpkg (no se commitea, ver README)."
         )
-    return gpd.read_file(RANCHOS_SNAPSHOT_PATH)
+    try:
+        return gpd.read_file(RANCHOS_SNAPSHOT_PATH, layer="ranchos")
+    except Exception:
+        return gpd.read_file(RANCHOS_SNAPSHOT_PATH)  # snapshot antiguo, sin capas nombradas
 
 
 def _obtener_ranchos_db() -> gpd.GeoDataFrame:
