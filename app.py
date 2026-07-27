@@ -65,7 +65,7 @@ from src.fires import calcular_avance, excluir_paises, formatear_duracion, geoco
 from src.gee_hotspots import obtener_hotspots_gee
 from src.pdf_report import generar_pdf_aviso
 from src.ranches import obtener_ranchos_es, obtener_zonas_es
-from src.risk import anillos_riesgo, estado_foco, evaluar_riesgo
+from src.risk import anillos_riesgo, bbox_vista_general, estado_foco, evaluar_riesgo
 
 st.set_page_config(page_title="Alerta de incendios — Ixorigue", layout="wide", page_icon="🔥", initial_sidebar_state="collapsed")
 
@@ -393,6 +393,16 @@ def _hotspots_mismo_fuego_de(aviso_row, hotspots_df):
     if pd.isna(aviso_row.get("fire_id")):
         return None
     return hotspots_df[hotspots_df["fire_id"] == aviso_row["fire_id"]]
+
+
+def _hotspots_vista_general_de(rancho_row, hotspots_df):
+    # mismo criterio que _hotspots_cercanos_de pero con el bbox mas ancho del mapa de vista
+    # general del informe PDF (rectangulo alargado) - sin esto, ese mapa mostraria terreno sin
+    # ningun hotspot en los bordes laterales aunque hubiera focos activos ahi
+    minx, miny, maxx, maxy = bbox_vista_general(rancho_row["geometry"])
+    return hotspots_df[
+        hotspots_df["longitude"].between(minx, maxx) & hotspots_df["latitude"].between(miny, maxy)
+    ]
 
 
 def _mapa_mini_aviso(rancho_row, aviso_row, hotspots_cercanos, posiciones_animales=None):
@@ -787,7 +797,10 @@ with col_panel:
                             if st.button("📄 Generar informe PDF", key=f"gen_pdf_{aviso['ranch_id']}", width="stretch"):
                                 with st.spinner("Generando informe PDF (mapas + meteo)..."):
                                     hs_mismo_fuego = _hotspots_mismo_fuego_de(aviso, hotspots)
-                                    st.session_state[key_pdf] = generar_pdf_aviso(rancho_row, aviso, hs_cercanos, hs_mismo_fuego)
+                                    hs_vista_general = _hotspots_vista_general_de(rancho_row, hotspots)
+                                    st.session_state[key_pdf] = generar_pdf_aviso(
+                                        rancho_row, aviso, hs_cercanos, hs_mismo_fuego, hs_vista_general,
+                                    )
                             if key_pdf in st.session_state:
                                 st.download_button(
                                     "⬇ Descargar informe PDF", data=st.session_state[key_pdf],
@@ -859,8 +872,10 @@ with col_panel:
                             with st.spinner("Generando informe PDF..."):
                                 hs_cercanos_fila = _hotspots_cercanos_de(rancho_fila, hotspots)
                                 hs_mismo_fuego_fila = _hotspots_mismo_fuego_de(aviso_fila, hotspots)
+                                hs_vista_general_fila = _hotspots_vista_general_de(rancho_fila, hotspots)
                                 st.session_state[key_pdf_fila] = generar_pdf_aviso(
                                     rancho_fila, aviso_fila, hs_cercanos_fila, hs_mismo_fuego_fila,
+                                    hs_vista_general_fila,
                                 )
                     with col_dl:
                         if key_pdf_fila in st.session_state:

@@ -1,6 +1,6 @@
 import geopandas as gpd
 import pandas as pd
-from shapely.geometry import Point
+from shapely.geometry import Point, box
 
 from .config import CARDINAL_ES, RING_RISK, RING_THRESHOLDS_KM
 from .fires import formatear_duracion
@@ -40,6 +40,31 @@ def anillos_riesgo(rancho_geom):
         (label, base_m.buffer(km * 1000).to_crs("EPSG:4326").iloc[0])
         for km, label in zip(RING_THRESHOLDS_KM, ANILLOS_LABELS)
     ]
+
+
+# aspect_ratio (ancho/alto) del mapa "vista general" del informe PDF (src/pdf_report.py) - vive
+# aqui (no en pdf_report.py) para que bbox_vista_general() pueda usar exactamente el mismo valor
+# al calcular que hotspots caen dentro del area visible de ese mapa, sin duplicar la constante
+MAPA_GENERAL_ASPECT = 2.2
+
+
+def bbox_vista_general(rancho_geom, aspect_ratio: float = MAPA_GENERAL_ASPECT, padding_frac: float = 0.08):
+    """Bbox (minx, miny, maxx, maxy) en EPSG:4326 que cubre exactamente la misma area visible que
+    el mapa de "vista general" del informe PDF (rectangulo alargado centrado en el anillo de
+    10km) - se usa para filtrar que hotspots incluir en ese mapa, igual que el bbox del anillo de
+    10km se usa para filtrar los hotspots "cercanos" del resto de mapas/narrativa. Sin esto, el
+    mapa (mas ancho que el area de 10km) mostraria terreno sin ningun hotspot en los bordes
+    aunque si hubiera focos activos ahi."""
+    outer_ring_3857 = gpd.GeoSeries([anillos_riesgo(rancho_geom)[-1][1]], crs="EPSG:4326").to_crs(CRS_METRICO)
+    minx, miny, maxx, maxy = outer_ring_3857.iloc[0].bounds
+    dx, dy = maxx - minx, maxy - miny
+    cx, cy = (minx + maxx) / 2, (miny + maxy) / 2
+    lado_y = max(dx, dy) * (1 + 2 * padding_frac)
+    lado_x = lado_y * aspect_ratio
+    caja_3857 = gpd.GeoSeries(
+        [box(cx - lado_x / 2, cy - lado_y / 2, cx + lado_x / 2, cy + lado_y / 2)], crs=CRS_METRICO,
+    )
+    return tuple(caja_3857.to_crs("EPSG:4326").iloc[0].bounds)
 
 # columnas del DataFrame de avisos, usadas tambien para el caso "sin avisos": un pd.DataFrame()
 # a secas no tiene columnas, y el codigo llamante (app.py) siempre indexa por nombre de columna

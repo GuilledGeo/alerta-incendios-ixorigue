@@ -47,7 +47,9 @@ import matplotlib.patches as mpatches
 from .config import HOTSPOT_AGE_BINS_H, HOTSPOT_AGE_COLORS, RING_THRESHOLDS_KM, WINDOW_HOURS_DEFAULT
 from .geo_utils import bearing_deg
 from .interpretacion import detectar_rodeado, interpretar_riesgo, interpretar_viento
-from .risk import ESTADO_FOCO_ACTIVO_H, ESTADO_FOCO_CONTROLADO_H, anillos_riesgo, estado_foco
+from .risk import (
+    ESTADO_FOCO_ACTIVO_H, ESTADO_FOCO_CONTROLADO_H, MAPA_GENERAL_ASPECT, anillos_riesgo, estado_foco,
+)
 from .weather import obtener_meteo_reciente
 
 LOGO_PATH = Path(__file__).resolve().parents[1] / "Logo_ixorigue-BpQt6KE7.png"
@@ -151,17 +153,16 @@ def _flecha_norte(ax):
     txt.set_path_effects([pe.withStroke(linewidth=2.5, foreground="black")])
 
 
-MAPA_GENERAL_ASPECT = 2.2  # ancho/alto - mapa 1 alargado, ocupa el ancho de la pagina
-
-
-def _mapa_general(rancho_row, hotspots_cercanos, aviso_row) -> BytesIO:
+def _mapa_general(rancho_row, hotspots_vista_general, aviso_row) -> BytesIO:
     """Vista general de la zona sobre OpenStreetMap: la finca y TODOS los focos de calor
-    detectados cerca (no solo el que dispara el aviso), para ver el incendio en su contexto
-    completo, no solo el punto mas cercano. Usa la MISMA escala/zoom (mismos metros por cm) que
-    _mapa_anillos (extent del anillo de 10km, mismo padding) para que ambos mapas sean
-    directamente comparables - solo cambia el mapa base (calles en vez de satelite) y la forma
-    (rectangulo alargado en vez de cuadrado, para ocupar el ancho completo de la primera pagina
-    junto con la cabecera y el texto introductorio)."""
+    activos dentro del area visible de este mapa (no solo el que dispara el aviso ni solo los
+    "cercanos" en sentido estricto de anillo de 10km - `hotspots_vista_general` viene
+    pre-filtrado por src.risk.bbox_vista_general(), que cubre exactamente el rectangulo alargado
+    que se ve aqui, para no dejar fuera focos activos que caen en los bordes laterales). Usa la
+    MISMA escala/zoom (mismos metros por cm) que _mapa_anillos (extent del anillo de 10km, mismo
+    padding) para que ambos mapas sean directamente comparables - solo cambia el mapa base
+    (calles en vez de satelite) y la forma (rectangulo alargado en vez de cuadrado, para ocupar
+    el ancho completo de la primera pagina junto con la cabecera y el texto introductorio)."""
     rancho_geom = rancho_row["geometry"]
     fig, ax = plt.subplots(figsize=(11, 11 / MAPA_GENERAL_ASPECT))
 
@@ -172,11 +173,12 @@ def _mapa_general(rancho_row, hotspots_cercanos, aviso_row) -> BytesIO:
     # mapas comparten exactamente la misma escala de vista
     outer_ring_3857 = gpd.GeoSeries([anillos_riesgo(rancho_geom)[-1][1]], crs="EPSG:4326").to_crs(CRS_METRICO).iloc[0]
 
-    if hotspots_cercanos is not None and not hotspots_cercanos.empty:
+    if hotspots_vista_general is not None and not hotspots_vista_general.empty:
         pts_3857 = gpd.GeoSeries(
-            gpd.points_from_xy(hotspots_cercanos["longitude"], hotspots_cercanos["latitude"]), crs="EPSG:4326",
+            gpd.points_from_xy(hotspots_vista_general["longitude"], hotspots_vista_general["latitude"]),
+            crs="EPSG:4326",
         ).to_crs(CRS_METRICO)
-        colores_edad = [_color_edad_hotspot(dt)[1] for dt in hotspots_cercanos["acq_datetime"]]
+        colores_edad = [_color_edad_hotspot(dt)[1] for dt in hotspots_vista_general["acq_datetime"]]
         ax.scatter(pts_3857.x, pts_3857.y, marker="o", s=70, c=colores_edad,
                    edgecolor="white", linewidth=0.6, zorder=5)
 
@@ -197,7 +199,7 @@ def _mapa_general(rancho_row, hotspots_cercanos, aviso_row) -> BytesIO:
         mpatches.Patch(facecolor="#ffd166", alpha=0.4, edgecolor="#7c1d0f", label="Perímetro de la finca"),
         mlines.Line2D([], [], marker="*", linestyle="", color="#dc2626", markeredgecolor="white",
                       markersize=13, label="Foco que dispara este aviso"),
-    ] + _handles_leyenda_hotspots(hotspots_cercanos)
+    ] + _handles_leyenda_hotspots(hotspots_vista_general)
     ax.legend(handles=handles, loc="upper left", fontsize=6, framealpha=0.88, edgecolor="none")
 
     buf = BytesIO()
@@ -312,6 +314,13 @@ def _grafico_viento(
         direccion_sopla = math.radians((fila["direccion_grados"] + 180) % 360)
         ax.scatter([direccion_sopla], [fila["velocidad_kmh"]], s=tamanos[i], color=colores[i],
                    edgecolor="#1e3a5f", linewidth=0.5, zorder=5, alpha=0.92)
+        # hora de cada punto (hora local), para saber a que momento corresponde cada lectura sin
+        # tener que adivinarlo solo por el tono/tamano del punto
+        etiqueta_hora = ax.annotate(
+            fila["fecha_hora"].strftime("%H:%M"), xy=(direccion_sopla, fila["velocidad_kmh"]),
+            xytext=(6, 6), textcoords="offset points", fontsize=6, color="#1e3a5f", zorder=7,
+        )
+        etiqueta_hora.set_path_effects([pe.withStroke(linewidth=2, foreground="white")])
 
     if bearing_foco_a_finca is not None:
         ang = math.radians(bearing_foco_a_finca)
@@ -403,10 +412,20 @@ def _pie_pagina(canvas, doc):
     canvas.restoreState()
 
 
-def generar_pdf_aviso(rancho_row, aviso_row, hotspots_cercanos, hotspots_mismo_fuego=None) -> bytes:
+def generar_pdf_aviso(
+    rancho_row, aviso_row, hotspots_cercanos, hotspots_mismo_fuego=None, hotspots_vista_general=None,
+) -> bytes:
     """Genera el informe PDF de un aviso concreto y devuelve los bytes (listos para
     st.download_button). No depende de BD - todo lo que usa (ranchos/avisos ya calculados,
-    Open-Meteo sin API key) funciona igual en el despliegue publico que en local."""
+    Open-Meteo sin API key) funciona igual en el despliegue publico que en local.
+
+    `hotspots_vista_general` (opcional) es el conjunto de hotspots a pintar en el mapa de vista
+    general (rectangulo alargado, mas ancho que el anillo de 10km) - normalmente pre-filtrado por
+    src.risk.bbox_vista_general() para cubrir exactamente esa area. Si no se pasa, se usa
+    `hotspots_cercanos` (el bbox mas estrecho del anillo de 10km), que sigue funcionando pero
+    puede dejar fuera focos activos en los bordes laterales del mapa alargado."""
+    if hotspots_vista_general is None:
+        hotspots_vista_general = hotspots_cercanos
     centroide = rancho_row["geometry"].centroid
     # rumbo DESDE EL FOCO HACIA LA FINCA (no al reves) - es la direccion en la que tendria que
     # soplar el viento para empujar el fuego hacia la finca, ver interpretar_viento()
@@ -430,7 +449,7 @@ def generar_pdf_aviso(rancho_row, aviso_row, hotspots_cercanos, hotspots_mismo_f
     bearing_finca_a_foco = bearing_deg(centroide.y, centroide.x, aviso_row["hotspot_lat"], aviso_row["hotspot_lon"])
 
     try:
-        imagen_mapa_general = _mapa_general(rancho_row, hotspots_cercanos, aviso_row)
+        imagen_mapa_general = _mapa_general(rancho_row, hotspots_vista_general, aviso_row)
     except Exception:
         imagen_mapa_general = None  # sin conexion a internet (teselas de satelite) u otro fallo: no rompe el informe
     try:
