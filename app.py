@@ -84,6 +84,16 @@ RISK_BADGE = {
     "1/3": ("#3b82f6", "VIGILANCIA"),
 }
 ORDEN_RIESGO = {"3/3": 0, "2/3": 1, "1/3": 2}
+# desempate por urgencia temporal dentro de cada nivel de riesgo: con datos frescos (FIRMS API
+# directa, <3h de latencia - ver src/firms_api.py) ya se puede distinguir de verdad un foco
+# "Activo" ahora mismo de uno "Controlado" hace mas de 36h, asi que dentro del mismo nivel de
+# riesgo interesa ver antes el que sigue activo, no solo el mas cercano
+ORDEN_URGENCIA = {"Activo": 0, "En seguimiento": 1, "Controlado": 2}
+
+
+def _orden_urgencia(ultima_deteccion) -> int:
+    _, _, estado_texto = estado_foco(ultima_deteccion)
+    return ORDEN_URGENCIA.get(estado_texto, 3)
 
 # ============================== ESTILO ==============================
 
@@ -741,8 +751,9 @@ with col_panel:
             else:
                 ranking = avisos_filtrados.copy()
                 ranking["_orden"] = ranking["risk_level"].map(ORDEN_RIESGO)
-                ranking = ranking.sort_values(["_orden", "distance_km"]).reset_index(drop=True)
-                st.caption(f"{len(ranking)} / {len(avisos)} ganaderías con foco a menos de 10 km, ordenadas de más a menos grave.")
+                ranking["_urgencia"] = ranking["ultima_deteccion"].apply(_orden_urgencia)
+                ranking = ranking.sort_values(["_orden", "_urgencia", "distance_km"]).reset_index(drop=True)
+                st.caption(f"{len(ranking)} / {len(avisos)} ganaderías con foco a menos de 10 km, ordenadas de más a menos grave (y, dentro de cada nivel, focos activos antes que controlados).")
 
                 for i, aviso in ranking.iterrows():
                     telefono = aviso.get("customer_phone")
@@ -891,7 +902,10 @@ with col_panel:
                     "acq_datetime": "Detección (UTC)",
                 })
                 tabla_lista["_orden"] = tabla_lista["Riesgo"].map(ORDEN_RIESGO)
-                tabla_lista = tabla_lista.sort_values(["_orden", "Distancia (km)"]).drop(columns="_orden")
+                tabla_lista["_urgencia"] = tabla_lista["Estado"].map(ORDEN_URGENCIA).fillna(3)
+                tabla_lista = tabla_lista.sort_values(
+                    ["_orden", "_urgencia", "Distancia (km)"]
+                ).drop(columns=["_orden", "_urgencia"])
 
                 st.dataframe(tabla_lista, width="stretch", height=PANEL_HEIGHT - 90)
 
@@ -909,7 +923,8 @@ with col_panel:
                 st.caption("Informe individual en PDF por ganadería:")
                 lista_pdf = avisos_filtrados.copy()
                 lista_pdf["_orden"] = lista_pdf["risk_level"].map(ORDEN_RIESGO)
-                lista_pdf = lista_pdf.sort_values(["_orden", "distance_km"]).reset_index(drop=True)
+                lista_pdf["_urgencia"] = lista_pdf["ultima_deteccion"].apply(_orden_urgencia)
+                lista_pdf = lista_pdf.sort_values(["_orden", "_urgencia", "distance_km"]).reset_index(drop=True)
 
                 for _, aviso_fila in lista_pdf.iterrows():
                     col_nombre, col_gen, col_dl = st.columns([3, 1.3, 1.3])
