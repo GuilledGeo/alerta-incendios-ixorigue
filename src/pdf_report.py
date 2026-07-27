@@ -46,7 +46,7 @@ import matplotlib.patches as mpatches
 
 from .config import HOTSPOT_AGE_BINS_H, HOTSPOT_AGE_COLORS, RING_THRESHOLDS_KM, WINDOW_HOURS_DEFAULT
 from .geo_utils import bearing_deg
-from .interpretacion import calcular_ffwi, detectar_rodeado, interpretar_riesgo, interpretar_viento
+from .interpretacion import detectar_rodeado, interpretar_riesgo, interpretar_viento
 from .risk import ESTADO_FOCO_ACTIVO_H, ESTADO_FOCO_CONTROLADO_H, anillos_riesgo, estado_foco
 from .weather import obtener_meteo_reciente
 
@@ -69,14 +69,15 @@ COLORS_RING = {
 CRS_METRICO = "EPSG:3857"
 
 
-def _preparar_ejes_mapa(ax, geoms_3857, padding_frac: float = 0.2, proveedor=None):
-    """Encuadra los ejes a un extent CUADRADO que cubre `geoms_3857` (con margen) y superpone un
-    mapa base (por defecto imagen de satelite Esri World Imagery, misma fuente que usa el mapa
-    interactivo de la app; se puede pasar `proveedor=ctx.providers.OpenStreetMap.Mapnik` para un
-    mapa de calles en vez de satelite). Forzar un extent cuadrado (mismo ancho que alto en
-    metros) es necesario porque el contenido real casi nunca es cuadrado - sin esto,
+def _preparar_ejes_mapa(ax, geoms_3857, padding_frac: float = 0.2, proveedor=None, aspect_ratio: float = 1.0):
+    """Encuadra los ejes a un extent que cubre `geoms_3857` (con margen) y superpone un mapa base
+    (por defecto imagen de satelite Esri World Imagery, misma fuente que usa el mapa interactivo
+    de la app; se puede pasar `proveedor=ctx.providers.OpenStreetMap.Mapnik` para un mapa de
+    calles en vez de satelite). `aspect_ratio` (ancho/alto) por defecto da un extent CUADRADO -
+    necesario porque el contenido real casi nunca es cuadrado y, sin forzarlo,
     ax.set_aspect("equal") + bbox_inches="tight" recorta la imagen final de forma desigual y el
-    mapa sale estirado/rectangular en vez de cuadrado.
+    mapa sale estirado. Un aspect_ratio > 1 da un rectangulo mas ancho que alto (mismo numero de
+    metros por cm en ambos ejes - la "escala" no cambia, solo se ve mas terreno a los lados).
 
     Si no hay conexion a internet o falla la descarga de teselas, se deja el mapa sin fondo en
     vez de romper la generacion del informe."""
@@ -84,9 +85,10 @@ def _preparar_ejes_mapa(ax, geoms_3857, padding_frac: float = 0.2, proveedor=Non
     minx, miny, maxx, maxy = total.bounds
     dx, dy = (maxx - minx) or 200, (maxy - miny) or 200
     cx, cy = (minx + maxx) / 2, (miny + maxy) / 2
-    lado = max(dx, dy) * (1 + 2 * padding_frac)
-    ax.set_xlim(cx - lado / 2, cx + lado / 2)
-    ax.set_ylim(cy - lado / 2, cy + lado / 2)
+    lado_y = max(dx, dy) * (1 + 2 * padding_frac)
+    lado_x = lado_y * aspect_ratio
+    ax.set_xlim(cx - lado_x / 2, cx + lado_x / 2)
+    ax.set_ylim(cy - lado_y / 2, cy + lado_y / 2)
     ax.set_aspect("equal")
     try:
         ctx.add_basemap(ax, source=proveedor or ctx.providers.Esri.WorldImagery, crs=CRS_METRICO, attribution_size=5)
@@ -149,15 +151,19 @@ def _flecha_norte(ax):
     txt.set_path_effects([pe.withStroke(linewidth=2.5, foreground="black")])
 
 
+MAPA_GENERAL_ASPECT = 2.2  # ancho/alto - mapa 1 alargado, ocupa el ancho de la pagina
+
+
 def _mapa_general(rancho_row, hotspots_cercanos, aviso_row) -> BytesIO:
     """Vista general de la zona sobre OpenStreetMap: la finca y TODOS los focos de calor
     detectados cerca (no solo el que dispara el aviso), para ver el incendio en su contexto
-    completo, no solo el punto mas cercano. Usa la MISMA escala/zoom que _mapa_anillos (extent
-    del anillo de 10km, mismo padding) para que ambos mapas sean directamente comparables - solo
-    cambia el mapa base (calles en vez de satelite) y el tamano de impresion (mas pequeno, para
-    que quepa en la primera pagina junto con la cabecera y el texto introductorio)."""
+    completo, no solo el punto mas cercano. Usa la MISMA escala/zoom (mismos metros por cm) que
+    _mapa_anillos (extent del anillo de 10km, mismo padding) para que ambos mapas sean
+    directamente comparables - solo cambia el mapa base (calles en vez de satelite) y la forma
+    (rectangulo alargado en vez de cuadrado, para ocupar el ancho completo de la primera pagina
+    junto con la cabecera y el texto introductorio)."""
     rancho_geom = rancho_row["geometry"]
-    fig, ax = plt.subplots(figsize=(6.2, 6.2))
+    fig, ax = plt.subplots(figsize=(11, 11 / MAPA_GENERAL_ASPECT))
 
     rancho_3857 = gpd.GeoSeries([rancho_geom], crs="EPSG:4326").to_crs(CRS_METRICO)
     rancho_3857.plot(ax=ax, color="#ffd166", alpha=0.4, edgecolor="#7c1d0f", linewidth=2.2, zorder=4)
@@ -179,7 +185,10 @@ def _mapa_general(rancho_row, hotspots_cercanos, aviso_row) -> BytesIO:
     ax.scatter([foco_3857.x], [foco_3857.y], marker="*", s=280, color="#dc2626",
                edgecolor="white", linewidth=0.8, zorder=6)
 
-    _preparar_ejes_mapa(ax, [outer_ring_3857], padding_frac=0.08, proveedor=ctx.providers.OpenStreetMap.Mapnik)
+    _preparar_ejes_mapa(
+        ax, [outer_ring_3857], padding_frac=0.08, proveedor=ctx.providers.OpenStreetMap.Mapnik,
+        aspect_ratio=MAPA_GENERAL_ASPECT,
+    )
     _flecha_norte(ax)
     _etiqueta_zona(ax, rancho_row, rancho_3857.iloc[0].centroid)
     ax.set_title("Vista general — OpenStreetMap", fontsize=10, pad=10)
@@ -273,13 +282,17 @@ def _mapa_anillos(rancho_row, hotspots_cercanos, aviso_row) -> BytesIO:
     return buf
 
 
-def _grafico_viento(meteo_df: pd.DataFrame, bearing_foco_a_finca: float | None) -> BytesIO:
+def _grafico_viento(
+    meteo_df: pd.DataFrame, bearing_foco_a_finca: float | None, bearing_finca_a_foco: float | None = None,
+) -> BytesIO:
     """Radar/brujula de viento en "modo sonar": un punto por hora reciente, en la direccion hacia
     la que SOPLA el viento (no de donde viene) y a una distancia del centro proporcional a la
     velocidad en km/h - cuanto mas oscuro y mas grande el punto, mas reciente es (como un eco de
     sonar que se desvanece con el tiempo). La linea roja marca el rumbo desde el foco hacia la
     finca: si los puntos de viento caen cerca de esa linea, el viento sopla en la direccion del
-    fuego hacia la finca (desfavorable); si caen lejos, no."""
+    fuego hacia la finca (desfavorable); si caen lejos, no. Ademas se marca con una estrella la
+    direccion en la que esta el foco activo respecto a la finca (el brujula esta centrada en la
+    finca), para orientar de un vistazo donde esta el fuego sin tener que mirar el mapa."""
     fig = plt.figure(figsize=(5.4, 5.4))
     ax = fig.add_subplot(111, projection="polar")
     ax.set_theta_zero_location("N")
@@ -306,6 +319,14 @@ def _grafico_viento(meteo_df: pd.DataFrame, bearing_foco_a_finca: float | None) 
         ax.text(ang, vmax * 1.1, "Su finca", ha="center", va="center", fontsize=7.5,
                 color="#dc2626", fontweight="bold")
 
+    if bearing_finca_a_foco is not None:
+        ang_foco = math.radians(bearing_finca_a_foco)
+        r_foco = vmax * 0.55
+        ax.scatter([ang_foco], [r_foco], marker="*", s=220, color="#f97316",
+                   edgecolor="black", linewidth=0.6, zorder=6)
+        ax.text(ang_foco, r_foco * 1.28, "Foco activo", ha="center", va="center", fontsize=7,
+                color="#f97316", fontweight="bold")
+
     ax.set_thetagrids(range(0, 360, 45), labels=["N", "NE", "E", "SE", "S", "SO", "O", "NO"], fontsize=8)
     ax.set_title(
         "Radar de viento (modo sonar) — hacia dónde sopla\n"
@@ -328,14 +349,16 @@ def _grafico_viento(meteo_df: pd.DataFrame, bearing_foco_a_finca: float | None) 
 def _grafico_meteo_24h(meteo_24h: pd.DataFrame) -> BytesIO:
     """Evolucion de temperatura y humedad relativa en las ultimas 24h, para dar contexto de
     maximas/minimas del dia mas alla de la media de las ultimas 6h ya mostrada en la tabla de
-    KPIs. Dos ejes Y (temperatura en rojo, humedad en azul) sobre el mismo eje X de horas."""
-    fig, ax_temp = plt.subplots(figsize=(11, 4))
+    KPIs. Dos ejes Y (temperatura en rojo, humedad en azul) sobre el mismo eje X de horas.
+    Figura mas cuadrada que ancha (a diferencia de una serie temporal tipica) para que quede bien
+    al colocarla en paralelo junto al radar de viento (cuadrado) en la misma fila de la pagina."""
+    fig, ax_temp = plt.subplots(figsize=(6.6, 5.4))
     horas_local = meteo_24h["fecha_hora"].dt.strftime("%H:%M")
 
     ax_temp.plot(horas_local, meteo_24h["temp_c"], color="#dc2626", linewidth=2, marker="o", markersize=3)
     ax_temp.set_ylabel("Temperatura (°C)", color="#dc2626", fontsize=9)
     ax_temp.tick_params(axis="y", labelcolor="#dc2626", labelsize=8)
-    ax_temp.tick_params(axis="x", labelsize=7, rotation=45)
+    ax_temp.tick_params(axis="x", labelsize=6.5, rotation=60)
 
     ax_hum = ax_temp.twinx()
     ax_hum.plot(horas_local, meteo_24h["humedad_pct"], color="#1d4ed8", linewidth=2, marker="o", markersize=3)
@@ -343,10 +366,10 @@ def _grafico_meteo_24h(meteo_24h: pd.DataFrame) -> BytesIO:
     ax_hum.tick_params(axis="y", labelcolor="#1d4ed8", labelsize=8)
 
     ax_temp.set_title(
-        "Temperatura y humedad — últimas 24 horas (Fuente: Open-Meteo)", fontsize=9.5, pad=10,
+        "Temperatura y humedad — últimas 24h\n(Fuente: Open-Meteo)", fontsize=9, pad=10,
     )
     ax_temp.grid(axis="x", alpha=0.15)
-    every = max(len(horas_local) // 12, 1)
+    every = max(len(horas_local) // 8, 1)
     ax_temp.set_xticks(range(0, len(horas_local), every))
     ax_temp.set_xticklabels(horas_local[::every])
     fig.tight_layout()
@@ -402,14 +425,9 @@ def generar_pdf_aviso(rancho_row, aviso_row, hotspots_cercanos, hotspots_mismo_f
     rodeado, texto_rodeado = detectar_rodeado(rancho_row["geometry"], hotspots_cercanos)
     piezas_riesgo = interpretar_riesgo(aviso_row, hotspots_mismo_fuego)
     viento = interpretar_viento(meteo_df, bearing_foco_a_finca) if hay_meteo else interpretar_viento(None, None)
-
-    ffwi = None
-    if hay_meteo:
-        ultima_hora = meteo_df.iloc[-1]
-        try:
-            ffwi = calcular_ffwi(ultima_hora["temp_c"], ultima_hora["humedad_pct"], ultima_hora["velocidad_kmh"])
-        except Exception:
-            ffwi = None
+    # rumbo DESDE LA FINCA HACIA EL FOCO (el inverso del anterior) - para senalar en el radar de
+    # viento en que direccion esta el foco activo respecto a la finca
+    bearing_finca_a_foco = bearing_deg(centroide.y, centroide.x, aviso_row["hotspot_lat"], aviso_row["hotspot_lon"])
 
     try:
         imagen_mapa_general = _mapa_general(rancho_row, hotspots_cercanos, aviso_row)
@@ -419,7 +437,7 @@ def generar_pdf_aviso(rancho_row, aviso_row, hotspots_cercanos, hotspots_mismo_f
         imagen_mapa_anillos = _mapa_anillos(rancho_row, hotspots_cercanos, aviso_row)
     except Exception:
         imagen_mapa_anillos = None
-    imagen_viento = _grafico_viento(meteo_df, bearing_foco_a_finca) if hay_meteo else None
+    imagen_viento = _grafico_viento(meteo_df, bearing_foco_a_finca, bearing_finca_a_foco) if hay_meteo else None
     try:
         imagen_meteo_24h = _grafico_meteo_24h(meteo_24h) if hay_meteo_24h else None
     except Exception:
@@ -585,7 +603,7 @@ def generar_pdf_aviso(rancho_row, aviso_row, hotspots_cercanos, hotspots_mismo_f
     story.append(_linea())
     story.append(Paragraph("Situación", estilo_subtitulo))
     if imagen_mapa_general is not None:
-        imagen_general_flow = Image(imagen_mapa_general, width=9.5 * cm, height=9.5 * cm, kind="proportional")
+        imagen_general_flow = Image(imagen_mapa_general, width=16 * cm, height=16 * cm, kind="proportional")
         imagen_general_flow.hAlign = "CENTER"
         story.append(KeepTogether([
             Paragraph("<i>Vista general: la finca y todos los focos detectados en la zona.</i>", estilo_matiz),
@@ -654,48 +672,38 @@ def generar_pdf_aviso(rancho_row, aviso_row, hotspots_cercanos, hotspots_mismo_f
             story.append(Paragraph(
                 "<i>La humedad relativa media es baja, lo que favorece la propagación del fuego.</i>", estilo_matiz,
             ))
-
-        if ffwi is not None:
-            story.append(Spacer(1, 0.2 * cm))
-            estilo_ffwi = ParagraphStyle(
-                "ffwi_es", parent=estilo_destacado, textColor=rl_colors.white, fontName="Helvetica-Bold",
-            )
-            caja_ffwi = Table([[Paragraph(ffwi["frase"], estilo_ffwi)]], colWidths=[doc.width])
-            caja_ffwi.setStyle(TableStyle([
-                ("BACKGROUND", (0, 0), (-1, -1), rl_colors.HexColor(ffwi["color"])),
-                ("LEFTPADDING", (0, 0), (-1, -1), 10),
-                ("RIGHTPADDING", (0, 0), (-1, -1), 10),
-                ("TOPPADDING", (0, 0), (-1, -1), 7),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
-            ]))
-            story.append(caja_ffwi)
-            story.append(Paragraph(
-                "<i>Índice de Fosberg: combina temperatura, humedad y viento en un único número "
-                "(0-100+) para estimar de un vistazo qué tan favorables son las condiciones "
-                "meteorológicas actuales a la propagación de un incendio. Es orientativo, no "
-                "sustituye a los índices oficiales de peligro.</i>", estilo_matiz,
-            ))
     else:
         story.append(Paragraph("No se han podido obtener datos meteorológicos recientes para esta zona.", estilo_normal))
 
-    # las dos graficas (radar de viento + evolucion 24h) van en un unico KeepTogether para que
-    # reportlab las mantenga siempre en la misma pagina, sin forzar un salto de pagina fijo que
-    # dejaria hueco en blanco si el resto del contenido de arriba ya llena la pagina actual
-    graficas_meteo = []
+    # las dos graficas (radar de viento + evolucion 24h) van una al lado de la otra, en una tabla
+    # de 2 columnas envuelta en KeepTogether - asi ocupan menos alto (caben en la misma pagina
+    # junto con el resto de "Condiciones meteorologicas" y el disclaimer final) y reportlab las
+    # mantiene siempre juntas en la misma pagina
+    ancho_col_grafica = doc.width / 2 - 0.15 * cm
+    celda_viento, celda_24h = [], []
     if imagen_viento is not None:
-        imagen_viento_flow = Image(imagen_viento, width=8 * cm, height=8 * cm, kind="proportional")
+        imagen_viento_flow = Image(imagen_viento, width=ancho_col_grafica, height=ancho_col_grafica, kind="proportional")
         imagen_viento_flow.hAlign = "CENTER"
-        graficas_meteo.append(Spacer(1, 0.15 * cm))
-        graficas_meteo.append(imagen_viento_flow)
+        celda_viento = [imagen_viento_flow]
     if imagen_meteo_24h is not None:
-        graficas_meteo.append(Spacer(1, 0.1 * cm))
-        graficas_meteo.append(Paragraph(
-            "<i>Evolución de temperatura y humedad en las últimas 24 horas, para ver el contexto del día (máximas, mínimas, tendencia).</i>",
-            estilo_matiz,
-        ))
-        graficas_meteo.append(Image(imagen_meteo_24h, width=15 * cm, height=15 * cm, kind="proportional"))
-    if graficas_meteo:
-        story.append(KeepTogether(graficas_meteo))
+        imagen_24h_flow = Image(imagen_meteo_24h, width=ancho_col_grafica, height=ancho_col_grafica, kind="proportional")
+        imagen_24h_flow.hAlign = "CENTER"
+        celda_24h = [
+            Paragraph("<i>Evolución de temperatura y humedad, últimas 24 horas.</i>", estilo_matiz),
+            imagen_24h_flow,
+        ]
+    if celda_viento or celda_24h:
+        tabla_graficas = Table(
+            [[celda_viento or "", celda_24h or ""]], colWidths=[ancho_col_grafica, ancho_col_grafica],
+        )
+        tabla_graficas.setStyle(TableStyle([
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 0),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+            ("TOPPADDING", (0, 0), (-1, -1), 0),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
+        ]))
+        story.append(KeepTogether([Spacer(1, 0.15 * cm), tabla_graficas]))
 
     # --- pie ---
     story.append(Spacer(1, 0.5 * cm))
