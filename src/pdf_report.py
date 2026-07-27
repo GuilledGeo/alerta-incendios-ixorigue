@@ -33,7 +33,7 @@ import matplotlib.patheffects as pe
 import matplotlib.pyplot as plt
 import pandas as pd
 from shapely.geometry import Point
-from shapely.ops import unary_union
+from shapely.ops import nearest_points, unary_union
 from reportlab.lib import colors as rl_colors
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
@@ -257,7 +257,12 @@ def _mapa_anillos(rancho_row, hotspots_cercanos, aviso_row) -> BytesIO:
 
     foco_3857 = gpd.GeoSeries([Point(aviso_row["hotspot_lon"], aviso_row["hotspot_lat"])],
                               crs="EPSG:4326").to_crs(CRS_METRICO).iloc[0]
-    ax.plot([centroide_3857.x, foco_3857.x], [centroide_3857.y, foco_3857.y],
+    # la linea sale del punto del PERIMETRO mas cercano al foco (mismo punto que usa el calculo
+    # real de "Distancia" en src/risk.py:evaluar_riesgo, un Polygon.distance(Point) que mide al
+    # borde, no al centro) - antes salia del centroide, dando la falsa impresion de que la
+    # distancia se mide desde el centro de la finca en vez de desde su perimetro real
+    punto_mas_cercano = nearest_points(rancho_3857.iloc[0], foco_3857)[0]
+    ax.plot([punto_mas_cercano.x, foco_3857.x], [punto_mas_cercano.y, foco_3857.y],
             linestyle="--", color="white", linewidth=1.6, zorder=5)
     ax.scatter([foco_3857.x], [foco_3857.y], marker="*", s=300, color="#dc2626",
                edgecolor="white", linewidth=0.8, zorder=6)
@@ -662,7 +667,7 @@ def generar_pdf_aviso(
     if imagen_mapa_anillos is not None:
         story.append(KeepTogether([
             Paragraph(
-                "<i>Zonas de seguridad (3/5/10 km): línea discontinua desde el centro de la finca hasta el foco que dispara este aviso. Solo se muestran los focos dentro del anillo de 10 km.</i>",
+                "<i>Zonas de seguridad (3/5/10 km): línea discontinua desde el punto del perímetro más cercano hasta el foco que dispara este aviso. Solo se muestran los focos dentro del anillo de 10 km.</i>",
                 estilo_matiz,
             ),
             Image(imagen_mapa_anillos, width=16 * cm, height=16 * cm, kind="proportional"),

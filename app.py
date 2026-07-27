@@ -29,6 +29,8 @@ import geopandas as gpd
 import pandas as pd
 import streamlit as st
 from folium.plugins import MeasureControl
+from shapely.geometry import Point
+from shapely.ops import nearest_points
 from streamlit_folium import st_folium
 
 # puente secrets.toml -> variables de entorno, ANTES de importar src.config/src.ranches (que
@@ -452,9 +454,10 @@ def _hotspots_vista_general_de(rancho_row, hotspots_df):
 
 def _mapa_mini_aviso(rancho_row, aviso_row, hotspots_cercanos, posiciones_animales=None):
     """Mapa individual de un aviso: perimetro del rancho, anillos de riesgo (zonas de seguridad),
-    hotspot(s) cercanos, linea de distancia entre el centroide del rancho y el hotspot que
-    disparo el aviso, y (si hay BD en vivo) la ultima posicion conocida de los animales del
-    rancho - para ver de un vistazo si el ganado esta cerca del foco, no solo la finca."""
+    hotspot(s) cercanos, linea de distancia entre el PUNTO DEL PERIMETRO MAS CERCANO al foco (no
+    el centroide) y el hotspot que disparo el aviso, y (si hay BD en vivo) la ultima posicion
+    conocida de los animales del rancho - para ver de un vistazo si el ganado esta cerca del foco,
+    no solo la finca."""
     centroid = rancho_row["geometry"].centroid
     m = folium.Map(location=[centroid.y, centroid.x], zoom_start=11, tiles="Esri.WorldImagery")
 
@@ -482,8 +485,14 @@ def _mapa_mini_aviso(rancho_row, aviso_row, hotspots_cercanos, posiciones_animal
             tooltip=f"{hs['source']} · {edad_label} · {hs['acq_datetime']:%Y-%m-%d %H:%M} UTC",
         ).add_to(m)
 
+    # el punto de partida de la linea es el punto del PERIMETRO mas cercano al foco (mismo punto
+    # que usa el calculo real de "Distancia" en src/risk.py:evaluar_riesgo, un
+    # Polygon.distance(Point) que mide al borde, no al centro) - antes la linea salia del
+    # centroide, dando la falsa impresion de que la distancia se mide desde el centro de la finca
+    foco_point = Point(aviso_row["hotspot_lon"], aviso_row["hotspot_lat"])
+    punto_mas_cercano = nearest_points(rancho_row["geometry"], foco_point)[0]
     folium.PolyLine(
-        locations=[[centroid.y, centroid.x], [aviso_row["hotspot_lat"], aviso_row["hotspot_lon"]]],
+        locations=[[punto_mas_cercano.y, punto_mas_cercano.x], [aviso_row["hotspot_lat"], aviso_row["hotspot_lon"]]],
         color="#ffd166", weight=2, dash_array="6,6",
         tooltip=f"{aviso_row['distance_km']:.1f} km",
     ).add_to(m)
