@@ -37,7 +37,9 @@ from reportlab.lib import colors as rl_colors
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import cm
-from reportlab.platypus import HRFlowable, Image, KeepTogether, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+from reportlab.platypus import (
+    HRFlowable, Image, KeepTogether, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle,
+)
 
 import matplotlib.lines as mlines
 import matplotlib.patches as mpatches
@@ -45,7 +47,7 @@ import matplotlib.patches as mpatches
 from .config import HOTSPOT_AGE_BINS_H, HOTSPOT_AGE_COLORS, RING_THRESHOLDS_KM, WINDOW_HOURS_DEFAULT
 from .geo_utils import bearing_deg
 from .interpretacion import calcular_ffwi, detectar_rodeado, interpretar_riesgo, interpretar_viento
-from .risk import anillos_riesgo, estado_foco
+from .risk import ESTADO_FOCO_ACTIVO_H, ESTADO_FOCO_CONTROLADO_H, anillos_riesgo, estado_foco
 from .weather import obtener_meteo_reciente
 
 LOGO_PATH = Path(__file__).resolve().parents[1] / "Logo_ixorigue-BpQt6KE7.png"
@@ -67,12 +69,14 @@ COLORS_RING = {
 CRS_METRICO = "EPSG:3857"
 
 
-def _preparar_ejes_satelite(ax, geoms_3857, padding_frac: float = 0.2):
-    """Encuadra los ejes a un extent CUADRADO que cubre `geoms_3857` (con margen) y superpone
-    imagen de satelite (Esri World Imagery, misma fuente que usa el mapa interactivo de la app).
-    Forzar un extent cuadrado (mismo ancho que alto en metros) es necesario porque el contenido
-    real casi nunca es cuadrado - sin esto, ax.set_aspect("equal") + bbox_inches="tight" recorta
-    la imagen final de forma desigual y el mapa sale estirado/rectangular en vez de cuadrado.
+def _preparar_ejes_mapa(ax, geoms_3857, padding_frac: float = 0.2, proveedor=None):
+    """Encuadra los ejes a un extent CUADRADO que cubre `geoms_3857` (con margen) y superpone un
+    mapa base (por defecto imagen de satelite Esri World Imagery, misma fuente que usa el mapa
+    interactivo de la app; se puede pasar `proveedor=ctx.providers.OpenStreetMap.Mapnik` para un
+    mapa de calles en vez de satelite). Forzar un extent cuadrado (mismo ancho que alto en
+    metros) es necesario porque el contenido real casi nunca es cuadrado - sin esto,
+    ax.set_aspect("equal") + bbox_inches="tight" recorta la imagen final de forma desigual y el
+    mapa sale estirado/rectangular en vez de cuadrado.
 
     Si no hay conexion a internet o falla la descarga de teselas, se deja el mapa sin fondo en
     vez de romper la generacion del informe."""
@@ -85,7 +89,7 @@ def _preparar_ejes_satelite(ax, geoms_3857, padding_frac: float = 0.2):
     ax.set_ylim(cy - lado / 2, cy + lado / 2)
     ax.set_aspect("equal")
     try:
-        ctx.add_basemap(ax, source=ctx.providers.Esri.WorldImagery, crs=CRS_METRICO, attribution_size=5)
+        ctx.add_basemap(ax, source=proveedor or ctx.providers.Esri.WorldImagery, crs=CRS_METRICO, attribution_size=5)
     except Exception:
         pass
     ax.set_xticks([])
@@ -146,42 +150,46 @@ def _flecha_norte(ax):
 
 
 def _mapa_general(rancho_row, hotspots_cercanos, aviso_row) -> BytesIO:
-    """Vista general de la zona sobre imagen de satelite: la finca y TODOS los focos de calor
+    """Vista general de la zona sobre OpenStreetMap: la finca y TODOS los focos de calor
     detectados cerca (no solo el que dispara el aviso), para ver el incendio en su contexto
-    completo, no solo el punto mas cercano."""
+    completo, no solo el punto mas cercano. Usa la MISMA escala/zoom que _mapa_anillos (extent
+    del anillo de 10km, mismo padding) para que ambos mapas sean directamente comparables - solo
+    cambia el mapa base (calles en vez de satelite) y el tamano de impresion (mas pequeno, para
+    que quepa en la primera pagina junto con la cabecera y el texto introductorio)."""
     rancho_geom = rancho_row["geometry"]
-    fig, ax = plt.subplots(figsize=(7.6, 7.6))
+    fig, ax = plt.subplots(figsize=(6.2, 6.2))
 
     rancho_3857 = gpd.GeoSeries([rancho_geom], crs="EPSG:4326").to_crs(CRS_METRICO)
     rancho_3857.plot(ax=ax, color="#ffd166", alpha=0.4, edgecolor="#7c1d0f", linewidth=2.2, zorder=4)
-    geoms_extent = [rancho_3857.iloc[0]]
+
+    # extent = anillo de 10km (igual que _mapa_anillos), no el bbox de los hotspots - asi ambos
+    # mapas comparten exactamente la misma escala de vista
+    outer_ring_3857 = gpd.GeoSeries([anillos_riesgo(rancho_geom)[-1][1]], crs="EPSG:4326").to_crs(CRS_METRICO).iloc[0]
 
     if hotspots_cercanos is not None and not hotspots_cercanos.empty:
         pts_3857 = gpd.GeoSeries(
             gpd.points_from_xy(hotspots_cercanos["longitude"], hotspots_cercanos["latitude"]), crs="EPSG:4326",
         ).to_crs(CRS_METRICO)
         colores_edad = [_color_edad_hotspot(dt)[1] for dt in hotspots_cercanos["acq_datetime"]]
-        ax.scatter(pts_3857.x, pts_3857.y, marker="o", s=90, c=colores_edad,
-                   edgecolor="white", linewidth=0.7, zorder=5)
-        geoms_extent.extend(pts_3857.tolist())
+        ax.scatter(pts_3857.x, pts_3857.y, marker="o", s=70, c=colores_edad,
+                   edgecolor="white", linewidth=0.6, zorder=5)
 
     foco_3857 = gpd.GeoSeries([Point(aviso_row["hotspot_lon"], aviso_row["hotspot_lat"])],
                               crs="EPSG:4326").to_crs(CRS_METRICO).iloc[0]
-    ax.scatter([foco_3857.x], [foco_3857.y], marker="*", s=320, color="#dc2626",
+    ax.scatter([foco_3857.x], [foco_3857.y], marker="*", s=280, color="#dc2626",
                edgecolor="white", linewidth=0.8, zorder=6)
-    geoms_extent.append(foco_3857)
 
-    _preparar_ejes_satelite(ax, geoms_extent, padding_frac=0.35)
+    _preparar_ejes_mapa(ax, [outer_ring_3857], padding_frac=0.08, proveedor=ctx.providers.OpenStreetMap.Mapnik)
     _flecha_norte(ax)
     _etiqueta_zona(ax, rancho_row, rancho_3857.iloc[0].centroid)
-    ax.set_title("Vista general — imagen de satélite (Esri World Imagery)", fontsize=10, pad=10)
+    ax.set_title("Vista general — OpenStreetMap", fontsize=10, pad=10)
 
     handles = [
         mpatches.Patch(facecolor="#ffd166", alpha=0.4, edgecolor="#7c1d0f", label="Perímetro de la finca"),
         mlines.Line2D([], [], marker="*", linestyle="", color="#dc2626", markeredgecolor="white",
                       markersize=13, label="Foco que dispara este aviso"),
     ] + _handles_leyenda_hotspots(hotspots_cercanos)
-    ax.legend(handles=handles, loc="upper left", fontsize=6.5, framealpha=0.88, edgecolor="none")
+    ax.legend(handles=handles, loc="upper left", fontsize=6, framealpha=0.88, edgecolor="none")
 
     buf = BytesIO()
     fig.savefig(buf, format="jpg", dpi=150, bbox_inches="tight", pil_kwargs={"quality": 82})
@@ -244,10 +252,10 @@ def _mapa_anillos(rancho_row, hotspots_cercanos, aviso_row) -> BytesIO:
     ax.scatter([centroide_3857.x], [centroide_3857.y], marker="o", s=55, color="#1d4ed8",
                edgecolor="white", linewidth=0.6, zorder=6)
 
-    _preparar_ejes_satelite(ax, geoms_extent, padding_frac=0.08)
+    _preparar_ejes_mapa(ax, geoms_extent, padding_frac=0.08)
     _flecha_norte(ax)
     _etiqueta_zona(ax, rancho_row, centroide_3857)
-    ax.set_title("Zonas de seguridad (anillos de 3/5/10 km) — imagen de satélite", fontsize=10, pad=10)
+    ax.set_title("Zonas de seguridad (anillos de 3/5/10 km) — imagen de satélite (Esri World Imagery)", fontsize=10, pad=10)
 
     handles = [
         mpatches.Patch(facecolor="#ffd166", alpha=0.4, edgecolor="#7c1d0f", label="Perímetro de la finca"),
@@ -541,20 +549,30 @@ def generar_pdf_aviso(rancho_row, aviso_row, hotspots_cercanos, hotspots_mismo_f
     # visto nunca el panel) ---
     story.append(Spacer(1, 0.15 * cm))
     story.append(Paragraph(
-        f"<b>¿Qué es este informe?</b> Ixorigue vigila de forma automática los focos de calor "
-        f"detectados por satélite en un radio amplio alrededor de sus fincas, y avisa cuando "
-        f"alguno se acerca. Se usa una ventana de las últimas {WINDOW_HOURS_DEFAULT} horas: cada "
-        f"foco se clasifica en tres <b>anillos de seguridad</b> según su distancia al perímetro "
-        f"de la finca — <b>0-3&nbsp;km</b> (riesgo máximo), <b>3-5&nbsp;km</b> (riesgo alto) y "
-        f"<b>5-10&nbsp;km</b> (vigilancia) — que son los círculos discontinuos del segundo mapa "
-        f"de este informe.", estilo_matiz,
+        f"<b>¿Qué es este informe?</b> Desde Ixorigue hemos puesto en marcha una campaña de "
+        f"prevención y seguimiento de incendios para nuestros clientes: vigilamos de forma "
+        f"automática los focos de calor detectados por satélite en un radio amplio alrededor de "
+        f"sus fincas, y le avisamos cuando alguno se acerca. Se usa una ventana de las últimas "
+        f"{WINDOW_HOURS_DEFAULT} horas: cada foco se clasifica en tres <b>anillos de seguridad</b> "
+        f"según su distancia al perímetro de la finca — <b>0-3&nbsp;km</b> (riesgo máximo), "
+        f"<b>3-5&nbsp;km</b> (riesgo alto) y <b>5-10&nbsp;km</b> (vigilancia) — que son los "
+        f"círculos discontinuos del segundo mapa de este informe.", estilo_matiz,
     ))
     story.append(Paragraph(
-        "<i>Importante: esto no es una cámara en directo. Los satélites usados (VIIRS NOAA-20/"
-        "SNPP y FIRMS/MODIS) son de órbita polar y sobrevuelan cada punto de España solo unas "
-        "pocas veces al día — en total, como mucho 6-8 actualizaciones repartidas de forma "
-        "irregular a lo largo del día. Puede haber cambios reales en el terreno que aún no se "
-        "reflejen en el último dato disponible.</i>", estilo_matiz,
+        "<i>Importante: esto no es una cámara en directo. Los satélites que usamos captan "
+        "información varias veces al día, según las pasadas que hacen sobre la zona - no de "
+        "forma continua. Puede haber cambios reales en el terreno que aún no se reflejen en el "
+        "último dato disponible en este informe.</i>", estilo_matiz,
+    ))
+    story.append(Paragraph(
+        "<b>Estado del foco:</b> <i>Activo</i> = detectado hace menos de "
+        f"{ESTADO_FOCO_ACTIVO_H} horas, el fuego sigue registrando actividad. "
+        f"<i>En seguimiento</i> = entre {ESTADO_FOCO_ACTIVO_H} y {ESTADO_FOCO_CONTROLADO_H} "
+        "horas sin nueva detección, aún es pronto para descartar actividad. "
+        f"<i>Controlado/extinto</i> = más de {ESTADO_FOCO_CONTROLADO_H} horas sin nueva "
+        "detección: lo más probable es que esté controlado o ya extinto, aunque los focos "
+        "catalogados así pueden reactivarse si las condiciones lo favorecen.",
+        estilo_matiz,
     ))
 
     # --- mapas ---
@@ -567,9 +585,11 @@ def generar_pdf_aviso(rancho_row, aviso_row, hotspots_cercanos, hotspots_mismo_f
     story.append(_linea())
     story.append(Paragraph("Situación", estilo_subtitulo))
     if imagen_mapa_general is not None:
+        imagen_general_flow = Image(imagen_mapa_general, width=9.5 * cm, height=9.5 * cm, kind="proportional")
+        imagen_general_flow.hAlign = "CENTER"
         story.append(KeepTogether([
             Paragraph("<i>Vista general: la finca y todos los focos detectados en la zona.</i>", estilo_matiz),
-            Image(imagen_mapa_general, width=16 * cm, height=16 * cm, kind="proportional"),
+            imagen_general_flow,
         ]))
         story.append(Spacer(1, 0.3 * cm))
     if imagen_mapa_anillos is not None:
@@ -658,19 +678,24 @@ def generar_pdf_aviso(rancho_row, aviso_row, hotspots_cercanos, hotspots_mismo_f
     else:
         story.append(Paragraph("No se han podido obtener datos meteorológicos recientes para esta zona.", estilo_normal))
 
+    # las dos graficas (radar de viento + evolucion 24h) van en un unico KeepTogether para que
+    # reportlab las mantenga siempre en la misma pagina, sin forzar un salto de pagina fijo que
+    # dejaria hueco en blanco si el resto del contenido de arriba ya llena la pagina actual
+    graficas_meteo = []
     if imagen_viento is not None:
-        story.append(Spacer(1, 0.2 * cm))
-        story.append(Image(imagen_viento, width=11 * cm, height=11 * cm, kind="proportional"))
-
+        imagen_viento_flow = Image(imagen_viento, width=8 * cm, height=8 * cm, kind="proportional")
+        imagen_viento_flow.hAlign = "CENTER"
+        graficas_meteo.append(Spacer(1, 0.15 * cm))
+        graficas_meteo.append(imagen_viento_flow)
     if imagen_meteo_24h is not None:
-        story.append(Spacer(1, 0.2 * cm))
-        story.append(KeepTogether([
-            Paragraph(
-                "<i>Evolución de temperatura y humedad en las últimas 24 horas, para ver el contexto del día (máximas, mínimas, tendencia).</i>",
-                estilo_matiz,
-            ),
-            Image(imagen_meteo_24h, width=16 * cm, height=16 * cm, kind="proportional"),
-        ]))
+        graficas_meteo.append(Spacer(1, 0.1 * cm))
+        graficas_meteo.append(Paragraph(
+            "<i>Evolución de temperatura y humedad en las últimas 24 horas, para ver el contexto del día (máximas, mínimas, tendencia).</i>",
+            estilo_matiz,
+        ))
+        graficas_meteo.append(Image(imagen_meteo_24h, width=15 * cm, height=15 * cm, kind="proportional"))
+    if graficas_meteo:
+        story.append(KeepTogether(graficas_meteo))
 
     # --- pie ---
     story.append(Spacer(1, 0.5 * cm))
