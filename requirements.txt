@@ -9,3 +9,6 @@ sqlalchemy
 requests
 scikit-learn
 earthengine-api
+matplotlib
+reportlab
+contextily

@@ -8,6 +8,39 @@ from .geo_utils import bearing_deg, bearing_to_cardinal
 
 CRS_METRICO = "EPSG:3857"  # suficiente para distancias cortas (<50 km) sin distorsion relevante
 
+# umbrales (horas desde la ultima deteccion satelital del foco) para diferenciar los avisos
+# que siguen activos de los que probablemente ya estan controlados/extinguidos - compartido
+# entre app.py (badge del ranking) y src/pdf_report.py (informe PDF)
+ESTADO_FOCO_ACTIVO_H = 24
+ESTADO_FOCO_CONTROLADO_H = 36
+
+
+def estado_foco(ultima_deteccion) -> tuple[str, str, str]:
+    """(emoji+label, color, texto corto) segun antiguedad de la ultima deteccion del foco:
+    <24h = activo, 24-36h = en seguimiento (zona gris entre ambos umbrales), >=36h = controlado."""
+    if pd.isna(ultima_deteccion):
+        return "", "#6b7280", ""
+    horas = (pd.Timestamp.now(tz="UTC") - ultima_deteccion).total_seconds() / 3600.0
+    if horas < ESTADO_FOCO_ACTIVO_H:
+        return "🔥 Foco activo", "#ef4444", "Activo"
+    if horas >= ESTADO_FOCO_CONTROLADO_H:
+        return "✅ Foco controlado", "#22c55e", "Controlado"
+    return "🟡 En seguimiento", "#eab308", "En seguimiento"
+
+
+ANILLOS_LABELS = ["0-3 km", "3-5 km", "5-10 km"]  # deben coincidir en orden con RING_THRESHOLDS_KM
+
+
+def anillos_riesgo(rancho_geom):
+    """Buffers del perimetro del rancho a 3/5/10 km (zonas de seguridad), en el mismo sistema de
+    distancias que usa evaluar_riesgo() (distancia al perimetro, no al centroide). Compartida
+    entre app.py (mini-mapa Folium) y src/pdf_report.py (mapa estatico del informe PDF)."""
+    base_m = gpd.GeoSeries([rancho_geom], crs="EPSG:4326").to_crs(CRS_METRICO)
+    return [
+        (label, base_m.buffer(km * 1000).to_crs("EPSG:4326").iloc[0])
+        for km, label in zip(RING_THRESHOLDS_KM, ANILLOS_LABELS)
+    ]
+
 # columnas del DataFrame de avisos, usadas tambien para el caso "sin avisos": un pd.DataFrame()
 # a secas no tiene columnas, y el codigo llamante (app.py) siempre indexa por nombre de columna
 # (avisos["ranch_id"], avisos["risk_level"]...) incluso cuando no hay ninguna fila

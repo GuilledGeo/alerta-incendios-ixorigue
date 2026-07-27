@@ -5,6 +5,25 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+# fijar PROJ_LIB/PROJ_DATA ANTES de importar geopandas/pyproj (aqui, no en src/pdf_report.py:
+# el contexto PROJ de pyproj se inicializa la primera vez que se usa, y cambiar la variable de
+# entorno DESPUES no tiene efecto) - evita que otra instalacion de PROJ en el sistema (p.ej.
+# PostgreSQL/PostGIS local, habitual en equipos de desarrollo) con un proj.db incompatible rompa
+# silenciosamente las reproyecciones (el mapa estatico del informe PDF se quedaba sin imagen de
+# satelite de fondo). Es un no-op inofensivo si no hay ningun conflicto que resolver.
+try:
+    import importlib.util
+    # find_spec() localiza el modulo SIN ejecutarlo - un `import rasterio` normal ya dispara el
+    # registro interno de GDAL/PROJ en ese mismo instante, demasiado pronto para poder corregir
+    # la variable de entorno antes de que quede fijada
+    _spec = importlib.util.find_spec("rasterio")
+    _rasterio_proj_dir = Path(_spec.origin).resolve().parent / "proj_data" if _spec else None
+    if _rasterio_proj_dir and _rasterio_proj_dir.exists():
+        os.environ["PROJ_LIB"] = str(_rasterio_proj_dir)
+        os.environ["PROJ_DATA"] = str(_rasterio_proj_dir)
+except ImportError:
+    pass
+
 import folium
 import geopandas as gpd
 import pandas as pd
@@ -44,8 +63,9 @@ except Exception:
     pass
 from src.fires import calcular_avance, excluir_paises, formatear_duracion, geocodificar_incendios, identificar_incendios
 from src.gee_hotspots import obtener_hotspots_gee
+from src.pdf_report import generar_pdf_aviso
 from src.ranches import obtener_ranchos_es, obtener_zonas_es
-from src.risk import evaluar_riesgo
+from src.risk import anillos_riesgo, estado_foco, evaluar_riesgo
 
 st.set_page_config(page_title="Alerta de incendios — Ixorigue", layout="wide", page_icon="🔥", initial_sidebar_state="collapsed")
 
@@ -199,23 +219,7 @@ def _badge_html(risk_level: str) -> str:
     return f'<span class="ix-badge" style="background-color:{color}">{label} · {risk_level}</span>'
 
 
-# umbrales (horas desde la ultima deteccion satelital del foco) para diferenciar en el ranking
-# los avisos que siguen activos de los que probablemente ya estan controlados/extinguidos
-ESTADO_FOCO_ACTIVO_H = 24
-ESTADO_FOCO_CONTROLADO_H = 36
-
-
-def _estado_foco(ultima_deteccion) -> tuple[str, str, str]:
-    """(emoji+label, color, texto corto) segun antiguedad de la ultima deteccion del foco:
-    <24h = activo, 24-36h = en seguimiento (zona gris entre ambos umbrales), >=36h = controlado."""
-    if pd.isna(ultima_deteccion):
-        return "", "#6b7280", ""
-    horas = (pd.Timestamp.now(tz="UTC") - ultima_deteccion).total_seconds() / 3600.0
-    if horas < ESTADO_FOCO_ACTIVO_H:
-        return "🔥 Foco activo", "#ef4444", "Activo"
-    if horas >= ESTADO_FOCO_CONTROLADO_H:
-        return "✅ Foco controlado", "#22c55e", "Controlado"
-    return "🟡 En seguimiento", "#eab308", "En seguimiento"
+_estado_foco = estado_foco  # alias local, ver import de src.risk mas arriba
 
 
 def _estado_foco_badge_html(ultima_deteccion) -> str:
@@ -371,17 +375,24 @@ def _mapa_principal(ranchos_df, hotspots_df, resaltar_ids=None, centro=None, zoo
     return m
 
 
-ANILLOS_LABELS = ["0-3 km", "3-5 km", "5-10 km"]  # deben coincidir en orden con RING_THRESHOLDS_KM
+_anillos_riesgo = anillos_riesgo  # alias local, ver import de src.risk mas arriba
 
 
-def _anillos_riesgo(rancho_geom):
-    """Buffers del perimetro del rancho a 3/5/10 km (zonas de seguridad), en el mismo sistema de
-    distancias que usa evaluar_riesgo() (distancia al perimetro, no al centroide)."""
-    base_m = gpd.GeoSeries([rancho_geom], crs="EPSG:4326").to_crs("EPSG:3857")
-    return [
-        (label, base_m.buffer(km * 1000).to_crs("EPSG:4326").iloc[0])
-        for km, label in zip(RING_THRESHOLDS_KM, ANILLOS_LABELS)
+def _hotspots_cercanos_de(rancho_row, hotspots_df):
+    # ojo: filtrar por Ranches.Location (rancho_row["lat"]/["lon"]) es un bug si la geometria
+    # real (union de varias Zones, a veces dispersas) queda lejos de ese punto guardado - se usa
+    # en su lugar el propio bbox del anillo de 10km (el mismo que se dibuja), que por
+    # construccion siempre contiene cualquier hotspot a <=10km del poligono
+    minx, miny, maxx, maxy = _anillos_riesgo(rancho_row["geometry"])[-1][1].bounds
+    return hotspots_df[
+        hotspots_df["longitude"].between(minx, maxx) & hotspots_df["latitude"].between(miny, maxy)
     ]
+
+
+def _hotspots_mismo_fuego_de(aviso_row, hotspots_df):
+    if pd.isna(aviso_row.get("fire_id")):
+        return None
+    return hotspots_df[hotspots_df["fire_id"] == aviso_row["fire_id"]]
 
 
 def _mapa_mini_aviso(rancho_row, aviso_row, hotspots_cercanos, posiciones_animales=None):
@@ -741,6 +752,15 @@ with col_panel:
                         st.info(aviso["mensaje_final"])
                         st.caption(f"Foco que dispara este aviso: {aviso['source']} · {aviso['acq_datetime']:%Y-%m-%d %H:%M} UTC")
 
+                        # rancho_row/hs_cercanos son baratos (filtrado de dataframes ya en
+                        # memoria) - se calculan siempre, a diferencia del mini-mapa y el PDF
+                        # (las partes caras de este bloque), que solo se generan bajo peticion
+                        # explicita de un boton
+                        rancho_row = ranchos.loc[ranchos["ranch_id"] == aviso["ranch_id"]].iloc[0]
+                        hs_cercanos = _hotspots_cercanos_de(rancho_row, hotspots)
+
+                        col_mapa_btn, col_pdf_btn = st.columns(2)
+
                         # el mini-mapa es lo mas caro de este bloque (construye un Folium
                         # completo) - solo se genera bajo peticion explicita de este boton, no
                         # automaticamente al desplegar el expander: st.expander no expone de
@@ -750,24 +770,32 @@ with col_panel:
                         if key_mapa_visible not in st.session_state:
                             st.session_state[key_mapa_visible] = (i == 0)
                         mostrar_mapa = st.session_state[key_mapa_visible]
-                        if st.button(
-                            "🗺️ Ocultar mapa" if mostrar_mapa else "🗺️ Mostrar mapa",
-                            key=f"toggle_mapa_{aviso['ranch_id']}",
-                        ):
-                            st.session_state[key_mapa_visible] = not mostrar_mapa
-                            st.rerun()
+                        with col_mapa_btn:
+                            if st.button(
+                                "🗺️ Ocultar mapa" if mostrar_mapa else "🗺️ Mostrar mapa",
+                                key=f"toggle_mapa_{aviso['ranch_id']}", width="stretch",
+                            ):
+                                st.session_state[key_mapa_visible] = not mostrar_mapa
+                                st.rerun()
+
+                        # informe PDF: flujo en 2 pasos (generar -> descargar), igual que el
+                        # mapa, para no reconstruirlo en cada rerun mientras el aviso esta
+                        # desplegado - genera llamadas de red propias (Open-Meteo + teselas de
+                        # satelite), mas lento que el mini-mapa, de ahi mantenerlo aparte
+                        key_pdf = f"pdf_bytes_{aviso['ranch_id']}"
+                        with col_pdf_btn:
+                            if st.button("📄 Generar informe PDF", key=f"gen_pdf_{aviso['ranch_id']}", width="stretch"):
+                                with st.spinner("Generando informe PDF (mapas + meteo)..."):
+                                    hs_mismo_fuego = _hotspots_mismo_fuego_de(aviso, hotspots)
+                                    st.session_state[key_pdf] = generar_pdf_aviso(rancho_row, aviso, hs_cercanos, hs_mismo_fuego)
+                            if key_pdf in st.session_state:
+                                st.download_button(
+                                    "⬇ Descargar informe PDF", data=st.session_state[key_pdf],
+                                    file_name=f"informe_incendio_{aviso['ranch_name']}.pdf".replace(" ", "_"),
+                                    mime="application/pdf", key=f"dl_pdf_{aviso['ranch_id']}", width="stretch",
+                                )
 
                         if st.session_state[key_mapa_visible]:
-                            rancho_row = ranchos.loc[ranchos["ranch_id"] == aviso["ranch_id"]].iloc[0]
-                            # ojo: filtrar por Ranches.Location (rancho_row["lat"]/["lon"]) es un bug si
-                            # la geometria real (union de varias Zones, a veces dispersas) queda lejos de
-                            # ese punto guardado - se usa en su lugar el propio bbox del anillo de 10km
-                            # (el mismo que se dibuja), que por construccion siempre contiene cualquier
-                            # hotspot a <=10km del poligono, incluido el que dispara el aviso
-                            minx, miny, maxx, maxy = _anillos_riesgo(rancho_row["geometry"])[-1][1].bounds
-                            hs_cercanos = hotspots[
-                                hotspots["longitude"].between(minx, maxx) & hotspots["latitude"].between(miny, maxy)
-                            ]
                             # nota: la ultima posicion de los animales (obtener_ultimas_posiciones,
                             # src/ranches.py) se quito de este repo publico - requiere BD en vivo,
                             # que este repo no tiene por diseno; se mantiene en la copia interna
@@ -809,3 +837,35 @@ with col_panel:
                     file_name=f"avisos_incendios_{datetime.now(timezone.utc):%Y%m%d_%H%M}.csv",
                     mime="text/csv",
                 )
+
+                # st.dataframe no admite botones dentro de sus filas - se anade debajo una
+                # lista compacta con un boton de informe PDF real por cada ganaderia, mismas
+                # filas que la tabla de arriba (ordenadas igual por nivel de riesgo/distancia)
+                st.markdown("---")
+                st.caption("Informe individual en PDF por ganadería:")
+                lista_pdf = avisos_filtrados.copy()
+                lista_pdf["_orden"] = lista_pdf["risk_level"].map(ORDEN_RIESGO)
+                lista_pdf = lista_pdf.sort_values(["_orden", "distance_km"]).reset_index(drop=True)
+
+                for _, aviso_fila in lista_pdf.iterrows():
+                    col_nombre, col_gen, col_dl = st.columns([3, 1.3, 1.3])
+                    with col_nombre:
+                        st.write(f"**{aviso_fila['ranch_name']}** — {aviso_fila['customer_name']} · {aviso_fila['risk_level']}")
+
+                    rancho_fila = ranchos.loc[ranchos["ranch_id"] == aviso_fila["ranch_id"]].iloc[0]
+                    key_pdf_fila = f"pdf_bytes_lista_{aviso_fila['ranch_id']}"
+                    with col_gen:
+                        if st.button("📄 Generar", key=f"gen_pdf_lista_{aviso_fila['ranch_id']}", width="stretch"):
+                            with st.spinner("Generando informe PDF..."):
+                                hs_cercanos_fila = _hotspots_cercanos_de(rancho_fila, hotspots)
+                                hs_mismo_fuego_fila = _hotspots_mismo_fuego_de(aviso_fila, hotspots)
+                                st.session_state[key_pdf_fila] = generar_pdf_aviso(
+                                    rancho_fila, aviso_fila, hs_cercanos_fila, hs_mismo_fuego_fila,
+                                )
+                    with col_dl:
+                        if key_pdf_fila in st.session_state:
+                            st.download_button(
+                                "⬇ PDF", data=st.session_state[key_pdf_fila],
+                                file_name=f"informe_incendio_{aviso_fila['ranch_name']}.pdf".replace(" ", "_"),
+                                mime="application/pdf", key=f"dl_pdf_lista_{aviso_fila['ranch_id']}", width="stretch",
+                            )
