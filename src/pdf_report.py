@@ -7,6 +7,7 @@ import os
 from datetime import datetime, timezone
 from io import BytesIO
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 # rasterio trae su propia copia de PROJ/GDAL autocontenida - si la maquina tiene OTRA
 # instalacion de PROJ en el PATH/entorno (p.ej. PostgreSQL/PostGIS, muy habitual en equipos de
@@ -489,7 +490,12 @@ def generar_pdf_aviso(
 
     color_badge, label_badge = _badge_texto(aviso_row["risk_level"])
     _, _, estado_texto = estado_foco(aviso_row.get("ultima_deteccion"))
-    ahora_local = datetime.now(timezone.utc).astimezone().strftime("%d/%m/%Y %H:%M")
+    # hora LOCAL DE MADRID explicitamente (no .astimezone() a secas, que usa la zona horaria del
+    # sistema donde corre el proceso) - mismo bug que en src/weather.py: un servidor desplegado
+    # (Streamlit Cloud, normalmente en UTC) mostraba la hora de generacion del informe 1-2h por
+    # detras de la hora real de Madrid (CEST = UTC+2 en verano), confuso para el cliente que lee
+    # "informe generado a las X" y no coincide con la hora que ve en su reloj
+    ahora_local = datetime.now(timezone.utc).astimezone(ZoneInfo("Europe/Madrid")).strftime("%d/%m/%Y %H:%M")
 
     def _linea(color=COLOR_MARCA, grosor=1, espacio_antes=4, espacio_despues=10):
         return HRFlowable(width="100%", thickness=grosor, color=rl_colors.HexColor(color),
