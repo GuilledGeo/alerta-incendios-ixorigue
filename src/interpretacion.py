@@ -144,3 +144,52 @@ def interpretar_viento(meteo_df: pd.DataFrame, bearing_foco_a_finca: float | Non
             "su finca, aunque la dirección del viento puede cambiar a lo largo del día."
         )
     return resultado
+
+
+_UMBRALES_FFWI = [
+    (25, "bajo", "#22c55e", "condiciones poco favorables para que el fuego se propague con rapidez"),
+    (50, "moderado", "#eab308", "condiciones que ya favorecen una propagación notable del fuego"),
+    (75, "alto", "#f97316", "condiciones muy favorables para una propagación rápida del fuego"),
+    (float("inf"), "extremo", "#ef4444", "condiciones extremas: cualquier foco puede propagarse muy rápido"),
+]
+
+
+def calcular_ffwi(temp_c: float, humedad_pct: float, velocidad_kmh: float) -> dict:
+    """Índice de Peligro Meteorológico de Incendio de Fosberg (Fosberg Fire Weather Index),
+    fórmula estándar y de dominio público que combina temperatura, humedad relativa y viento -
+    justo los tres datos que ya se obtienen de Open-Meteo para este informe - en un único
+    número de 0 (sin peligro) a 100+ (peligro extremo). No sustituye a los índices oficiales
+    (p.ej. el de Protección Civil), es un KPI orientativo adicional.
+
+    Fórmula (Fosberg, 1978): a partir de temperatura/humedad se estima el contenido de
+    humedad del combustible fino muerto (m); con eso se calcula un factor de "capacidad de
+    combustión" (eta, 0-1); el FFWI final combina eta con la velocidad del viento.
+    """
+    temp_f = temp_c * 9 / 5 + 32
+    viento_mph = velocidad_kmh / 1.60934
+    h = humedad_pct
+
+    if h < 10:
+        m = 0.03229 + 0.281073 * h - 0.000578 * h * temp_f
+    elif h < 50:
+        m = 2.22749 + 0.160107 * h - 0.01478 * temp_f
+    else:
+        m = 21.0606 + 0.005565 * h**2 - 0.00035 * h * temp_f - 0.483199 * h
+
+    m_ratio = m / 30
+    eta = 1 - 2 * m_ratio + 1.5 * m_ratio**2 - 0.5 * m_ratio**3
+    eta = max(0.0, min(1.0, eta))
+    ffwi = eta * math.sqrt(1 + viento_mph**2) / 0.3002
+
+    _, categoria, color, consecuencia = next(
+        (umbral, cat, col, cons) for umbral, cat, col, cons in _UMBRALES_FFWI if ffwi < umbral
+    )
+    return {
+        "valor": round(ffwi, 1),
+        "categoria": categoria,
+        "color": color,
+        "frase": (
+            f"Índice de peligro meteorológico de incendio (Fosberg): {ffwi:.0f}/100 — "
+            f"nivel {categoria}. {consecuencia.capitalize()}."
+        ),
+    }
