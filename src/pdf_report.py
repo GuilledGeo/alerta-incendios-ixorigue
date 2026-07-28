@@ -39,7 +39,7 @@ from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import cm
 from reportlab.platypus import (
-    HRFlowable, Image, KeepTogether, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle,
+    HRFlowable, Image, KeepTogether, PageBreak, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle,
 )
 
 import matplotlib.lines as mlines
@@ -265,6 +265,14 @@ def _mapa_anillos(rancho_row, hotspots_cercanos, aviso_row) -> BytesIO:
     punto_mas_cercano = nearest_points(rancho_3857.iloc[0], foco_3857)[0]
     ax.plot([punto_mas_cercano.x, foco_3857.x], [punto_mas_cercano.y, foco_3857.y],
             linestyle="--", color="white", linewidth=1.6, zorder=5)
+    # distancia en km, en el punto medio de la linea (mismo valor que "Distancia" en la tabla
+    # resumen de arriba, ya calculado en src/risk.py:evaluar_riesgo - no se recalcula aqui)
+    punto_medio = ((punto_mas_cercano.x + foco_3857.x) / 2, (punto_mas_cercano.y + foco_3857.y) / 2)
+    txt_dist = ax.annotate(
+        f"{aviso_row['distance_km']:.1f} km", xy=punto_medio, xytext=(0, 5), textcoords="offset points",
+        ha="center", fontsize=8, fontweight="bold", color="white", zorder=7,
+    )
+    txt_dist.set_path_effects([pe.withStroke(linewidth=2.2, foreground="black")])
     ax.scatter([foco_3857.x], [foco_3857.y], marker="*", s=300, color="#dc2626",
                edgecolor="white", linewidth=0.8, zorder=6)
     ax.scatter([centroide_3857.x], [centroide_3857.y], marker="o", s=55, color="#1d4ed8",
@@ -721,8 +729,9 @@ def generar_pdf_aviso(
         texto_final = f"<b>{texto_rodeado}</b>" if rodeado else texto_rodeado
         story.append(Paragraph(texto_final, estilo_rodeado))
 
-    # --- meteo ---
-    story.append(_linea())
+    # --- meteo: siempre en pagina propia (a peticion expresa - antes el titulo de la seccion
+    # podia quedar colgando al final de la pagina 2 en vez de arrancar limpio) ---
+    story.append(PageBreak())
     story.append(Paragraph("Condiciones meteorológicas del lugar", estilo_subtitulo))
     if viento["frase_velocidad"]:
         story.append(Paragraph(f"<b>{viento['frase_velocidad']}</b>", estilo_destacado))
