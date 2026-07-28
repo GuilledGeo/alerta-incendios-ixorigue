@@ -265,12 +265,22 @@ def _mapa_anillos(rancho_row, hotspots_cercanos, aviso_row) -> BytesIO:
     punto_mas_cercano = nearest_points(rancho_3857.iloc[0], foco_3857)[0]
     ax.plot([punto_mas_cercano.x, foco_3857.x], [punto_mas_cercano.y, foco_3857.y],
             linestyle="--", color="white", linewidth=1.6, zorder=5)
-    # distancia en km, en el punto medio de la linea (mismo valor que "Distancia" en la tabla
-    # resumen de arriba, ya calculado en src/risk.py:evaluar_riesgo - no se recalcula aqui)
+    # distancia en km, en el punto medio de la linea y siguiendo su misma inclinacion (mismo
+    # valor que "Distancia" en la tabla resumen de arriba, ya calculado en
+    # src/risk.py:evaluar_riesgo - no se recalcula aqui). El angulo se normaliza a [-90, 90] para
+    # que el texto nunca quede boca abajo, independientemente de en que cuadrante caiga la linea.
     punto_medio = ((punto_mas_cercano.x + foco_3857.x) / 2, (punto_mas_cercano.y + foco_3857.y) / 2)
+    angulo_linea = math.degrees(math.atan2(
+        foco_3857.y - punto_mas_cercano.y, foco_3857.x - punto_mas_cercano.x,
+    ))
+    if angulo_linea > 90:
+        angulo_linea -= 180
+    elif angulo_linea < -90:
+        angulo_linea += 180
     txt_dist = ax.annotate(
         f"{aviso_row['distance_km']:.1f} km", xy=punto_medio, xytext=(0, 5), textcoords="offset points",
         ha="center", fontsize=8, fontweight="bold", color="white", zorder=7,
+        rotation=angulo_linea, rotation_mode="anchor",
     )
     txt_dist.set_path_effects([pe.withStroke(linewidth=2.2, foreground="black")])
     ax.scatter([foco_3857.x], [foco_3857.y], marker="*", s=300, color="#dc2626",
