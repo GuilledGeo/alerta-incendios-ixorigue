@@ -45,7 +45,7 @@ from reportlab.platypus import (
 import matplotlib.lines as mlines
 import matplotlib.patches as mpatches
 
-from .config import HOTSPOT_AGE_BINS_H, HOTSPOT_AGE_COLORS, RING_THRESHOLDS_KM
+from .config import COLORS_RING, HOTSPOT_AGE_BINS_H, HOTSPOT_AGE_COLORS, RING_THRESHOLDS_KM
 from .fires import formatear_hace
 from .geo_utils import bearing_deg
 from .interpretacion import detectar_rodeado, interpretar_riesgo, interpretar_viento
@@ -61,14 +61,6 @@ RISK_BADGE = {
     "2/3": ("#f97316", "RIESGO ALTO"),
     "1/3": ("#3b82f6", "VIGILANCIA"),
 }
-
-COLORS_RING = {
-    "Dentro (0 km)": "#d62728",
-    "0-3 km": "#06d6a0",
-    "3-5 km": "#ef476f",
-    "5-10 km": "#ffd166",
-}
-
 
 CRS_METRICO = "EPSG:3857"
 
