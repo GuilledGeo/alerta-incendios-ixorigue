@@ -1,5 +1,17 @@
 # alerta-incendios-ixorigue
 
+> ## ⚠️ Este es el repo que corre en producción — los fixes de código se editan en `ixo-geospacial`
+>
+> El desarrollo (con acceso a BD real) se hace en el monorepo interno
+> `E:\1_IXORIGUE\1_Proyectos\ixo-geospacial\side_projects\alerta_incendios\`. Este repo es una
+> copia de despliegue de ese código (`app.py`, `src/*.py`), **sin sincronización automática entre
+> ambos**. Cualquier bugfix o cambio hecho solo en el monorepo interno NO llega aquí solo, y por
+> tanto no se ve en la app real hasta que se copia y commitea aparte en este repo — ya pasó el
+> 28-jul-2026. Antes de dar un cambio por terminado, verificar con `diff` que los archivos tocados
+> quedan idénticos en ambos repos (`ranches.py` es la excepción esperada: aquí solo existe el modo
+> `snapshot`, no `db`). Ver la sección "DOS REPOS SEPARADOS" en el `README.md` del monorepo interno
+> para más detalle.
+
 Panel Streamlit de riesgo de incendio para las ganaderías de clientes de Ixorigue (España): cruza
 automáticamente el perímetro real (o aproximado) de cada finca contra los hotspots de incendio de
 Google Earth Engine (VIIRS NOAA-20/SNPP + FIRMS) y genera un ranking de ganaderías en riesgo, con

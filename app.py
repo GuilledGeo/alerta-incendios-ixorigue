@@ -73,6 +73,15 @@ from src.risk import anillos_riesgo, bbox_vista_general, estado_foco, evaluar_ri
 
 st.set_page_config(page_title="Alerta de incendios — Ixorigue", layout="wide", page_icon="🔥", initial_sidebar_state="collapsed")
 
+# logo en base64 para incrustarlo directamente en el HTML de la cabecera (ix-hero) - un simple
+# st.image() al lado quedaria fuera del degradado de la cabecera y desalineado con el titulo
+_LOGO_PATH = Path(__file__).resolve().parent / "Logo_ixorigue-BpQt6KE7.png"
+if _LOGO_PATH.exists():
+    import base64
+    LOGO_B64 = base64.b64encode(_LOGO_PATH.read_bytes()).decode("ascii")
+else:
+    LOGO_B64 = None
+
 COLOR_FUENTE = {
     "perimetro_dibujado": "#3b82f6",
     "union_de_zonas": "#22c55e",
@@ -121,6 +130,15 @@ st.markdown(f"""
     }}
     .ix-hero h1 {{margin: 0; font-size: 1.3rem; font-weight: 700; letter-spacing: -0.01em; white-space: nowrap;}}
     .ix-hero p {{margin: 0; opacity: 0.9; font-size: 0.82rem;}}
+    .ix-hero-logo {{
+        margin-left: auto;
+        align-self: center;
+        background: #fff;
+        border-radius: 8px;
+        padding: 4px 10px;
+        line-height: 0;
+    }}
+    .ix-hero-logo img {{height: 28px; display: block;}}
 
     .ix-toolbar {{
         background-color: rgba(127,127,127,0.06);
@@ -569,10 +587,12 @@ col_mapa, col_panel = st.columns([1, 1.15])
 with ph_header:
     col_titulo, col_info = st.columns([6, 1])
     with col_titulo:
-        st.markdown("""
+        logo_html = f'<div class="ix-hero-logo"><img src="data:image/png;base64,{LOGO_B64}" alt="Ixorigue"></div>' if LOGO_B64 else ""
+        st.markdown(f"""
         <div class="ix-hero">
             <h1>🔥 Panel de riesgo de incendio</h1>
             <p>Ixorigue — cruce automático de ranchos de clientes ES contra hotspots de incendio en tiempo casi real</p>
+            {logo_html}
         </div>
         """, unsafe_allow_html=True)
     with col_info:
