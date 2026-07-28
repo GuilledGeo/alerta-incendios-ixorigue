@@ -304,12 +304,12 @@ def _texto_cambio_ranking(cambio) -> str:
         return ""
     tipo, delta = cambio
     if tipo == "nuevo":
-        return "🆕 NUEVO"
+        return "🆕 Nuevo"
     if tipo == "sube":
-        return f"▲+{delta}"
+        return f"🔼{delta}"
     if tipo == "baja":
-        return f"▼-{delta}"
-    return "▬="
+        return f"🔽{delta}"
+    return "➖"
 
 
 def _badge_cambio_ranking_html(cambio) -> str:
@@ -320,12 +320,12 @@ def _badge_cambio_ranking_html(cambio) -> str:
         return ""
     tipo, delta = cambio
     if tipo == "nuevo":
-        return '<span class="ix-badge" style="background-color:#7c3aed">🆕 NUEVO</span>'
+        return '<span class="ix-badge" style="background-color:#7c3aed">🆕 Nuevo</span>'
     if tipo == "sube":
-        return f'<span class="ix-badge" style="background-color:#16a34a">▲ +{delta}</span>'
+        return f'<span class="ix-badge" style="background-color:#16a34a">🔼 {delta}</span>'
     if tipo == "baja":
-        return f'<span class="ix-badge" style="background-color:#dc2626">▼ -{delta}</span>'
-    return '<span class="ix-badge" style="background-color:#6b7280">▬ =</span>'
+        return f'<span class="ix-badge" style="background-color:#dc2626">🔽 {delta}</span>'
+    return '<span class="ix-badge" style="background-color:#6b7280">➖</span>'
 
 
 def _color_por_antiguedad(acq_datetime) -> tuple[str, str]:
