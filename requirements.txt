@@ -12,3 +12,4 @@ earthengine-api
 matplotlib
 reportlab
 contextily
+gspread

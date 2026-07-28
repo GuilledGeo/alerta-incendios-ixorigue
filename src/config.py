@@ -13,6 +13,13 @@ OUTPUTS_DIR = ROOT_DIR / "outputs"
 RANCHOS_DATA_SOURCE = os.getenv("RANCHOS_DATA_SOURCE", "db")
 RANCHOS_SNAPSHOT_PATH = Path(os.getenv("RANCHOS_SNAPSHOT_PATH", str(DATA_DIR / "ranchos_snapshot.gpkg")))
 
+# ID (de la URL) de una Google Sheet donde persistir el historial del ranking de riesgo entre
+# reinicios del contenedor de Streamlit Community Cloud, que no tiene disco persistente propio -
+# ver src/rank_history.py. Opcional: si no esta configurada, se usa un archivo JSON local
+# (data/ranking_historial.json), valido en desarrollo local pero que se pierde en cada reinicio
+# del contenedor en el despliegue publico.
+RANK_HISTORY_SHEET_ID = os.getenv("RANK_HISTORY_SHEET_ID")
+
 # Google Earth Engine - proyecto propio del usuario (credenciales ya presentes en esta maquina,
 # ~/.config/earthengine/credentials). Sobreescribible via .env si se usa otro proyecto/cuenta.
 GEE_PROJECT = os.getenv("GEE_PROJECT", "terrasetapp")

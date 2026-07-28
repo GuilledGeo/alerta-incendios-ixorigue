@@ -57,6 +57,15 @@ Pega el contenido de `snapshot_b64.txt` como `RANCHOS_SNAPSHOT_B64` en los Secre
 `.streamlit/secrets.toml.example`). Repite esto con la periodicidad que necesites (p. ej.
 semanal) — la cabecera de la app muestra la fecha de exportación del snapshot en uso.
 
+## Persistencia del ranking de riesgo (`RANK_HISTORY_SHEET_ID`, opcional)
+
+Streamlit Community Cloud no tiene disco persistente: sin este secret, las flechas de
+subida/bajada del ranking (`src/rank_history.py`) se resetean (todo "🆕 Nuevo") cada vez que el
+contenedor se reinicia (duerme por inactividad o se redespliega). Con él, el historial se guarda
+en una Google Sheet en vez de en un archivo local. Reutiliza la misma cuenta de servicio de
+`GEE_SERVICE_ACCOUNT_EMAIL`/`KEY_JSON` (no hace falta crear una nueva) — ver los 4 pasos
+detallados en `.streamlit/secrets.toml.example`.
+
 ## Cómo ejecutar en local
 
 ```
