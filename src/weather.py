@@ -5,9 +5,20 @@ import requests
 
 # reintentos ante fallos transitorios de red/API - un informe para cliente no deberia quedarse
 # sin datos meteorologicos por un timeout puntual de Open-Meteo, que en la practica ocurre de vez
-# en cuando (servicio gratuito, sin SLA)
+# en cuando (servicio gratuito, sin SLA). Backoff exponencial (2s, 4s) en vez de una espera fija:
+# un 429 (limite de peticiones) es mas frecuente de lo que parece en Streamlit Community Cloud,
+# porque las IPs de salida se comparten entre TODAS las apps gratuitas del servicio - el limite lo
+# puede agotar otra app ajena a esta, no necesariamente un uso excesivo propio.
 _INTENTOS = 3
-_ESPERA_ENTRE_INTENTOS_S = 1.5
+_ESPERA_INICIAL_S = 2.0
+
+# cache en memoria del proceso (no Streamlit) para no volver a pedir el mismo punto (o uno casi
+# identico) a Open-Meteo si se generan varios informes seguidos para la misma zona - reduce
+# justo el escenario que mas fácilmente dispara un 429. Clave a 2 decimales (~1 km de radio, de
+# sobra para meteorologia) y TTL corto: el dato en si ya es "reciente hasta la ultima hora
+# completa", no tiene sentido cachearlo mas alla de eso.
+_CACHE_TTL_S = 600
+_cache = {}
 
 
 def obtener_meteo_reciente(lat: float, lon: float, horas: int = 6) -> pd.DataFrame:
@@ -22,7 +33,15 @@ def obtener_meteo_reciente(lat: float, lon: float, horas: int = 6) -> pd.DataFra
     90=E...) - para saber hacia donde SOPLA (y por tanto hacia donde empuja el fuego) hay que
     sumarle 180 grados.
     """
+    clave_cache = (round(lat, 2), round(lon, 2), horas)
+    ahora = time.monotonic()
+    en_cache = _cache.get(clave_cache)
+    if en_cache is not None and ahora - en_cache[0] < _CACHE_TTL_S:
+        return en_cache[1]
+
     error = None
+    espera = _ESPERA_INICIAL_S
+    r = None
     for intento in range(_INTENTOS):
         try:
             r = requests.get(
@@ -37,12 +56,19 @@ def obtener_meteo_reciente(lat: float, lon: float, horas: int = 6) -> pd.DataFra
                 },
                 timeout=20,
             )
+            if r.status_code == 429 and intento < _INTENTOS - 1:
+                # Open-Meteo a veces indica cuanto esperar en la propia respuesta; si no,
+                # backoff exponencial (2s, 4s) en vez de la espera fija de antes
+                time.sleep(float(r.headers.get("Retry-After", espera)))
+                espera *= 2
+                continue
             r.raise_for_status()
             break
         except requests.exceptions.RequestException as e:
             error = e
             if intento < _INTENTOS - 1:
-                time.sleep(_ESPERA_ENTRE_INTENTOS_S)
+                time.sleep(espera)
+                espera *= 2
     else:
         raise error
 
@@ -73,4 +99,5 @@ def obtener_meteo_reciente(lat: float, lon: float, horas: int = 6) -> pd.DataFra
     # del servidor, no de la ubicacion real de la finca.
     ahora_madrid = pd.Timestamp.now(tz="Europe/Madrid").tz_localize(None).floor("h")
     df = df[df["fecha_hora"] <= ahora_madrid].tail(horas).reset_index(drop=True)
+    _cache[clave_cache] = (ahora, df)
     return df
