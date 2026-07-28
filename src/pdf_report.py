@@ -270,6 +270,16 @@ def _mapa_anillos(rancho_row, hotspots_cercanos, aviso_row) -> BytesIO:
     ax.scatter([centroide_3857.x], [centroide_3857.y], marker="o", s=55, color="#1d4ed8",
                edgecolor="white", linewidth=0.6, zorder=6)
 
+    # fecha/hora del foco concreto que dispara este aviso, junto a su estrella - distinta de la
+    # fecha/hora del "foco mas reciente en la zona" del titulo (ese puede ser OTRO hotspot mas
+    # nuevo del mismo incendio, este es especificamente el que genero la alerta)
+    ts_foco_aviso = aviso_row["acq_datetime"].tz_convert("Europe/Madrid").strftime("%d/%m %H:%M")
+    txt_foco = ax.annotate(
+        ts_foco_aviso, xy=(foco_3857.x, foco_3857.y), xytext=(8, 8), textcoords="offset points",
+        ha="left", fontsize=7.5, fontweight="bold", color="#dc2626", zorder=7,
+    )
+    txt_foco.set_path_effects([pe.withStroke(linewidth=2, foreground="white")])
+
     _preparar_ejes_mapa(ax, geoms_extent, padding_frac=0.08)
     _flecha_norte(ax)
     _etiqueta_zona(ax, rancho_row, centroide_3857)
@@ -671,7 +681,15 @@ def generar_pdf_aviso(
     story.append(_linea())
     story.append(Paragraph("Situación", estilo_subtitulo))
     if imagen_mapa_general is not None:
-        imagen_general_flow = Image(imagen_mapa_general, width=doc.width, height=doc.width, kind="proportional")
+        # ancho fijo por debajo de doc.width (no doc.width exacto: con kind="proportional" y
+        # aspect_ratio ancho/alto (MAPA_GENERAL_ASPECT), un margen de seguridad evita que el
+        # mapa se salga por los laterales de la pagina si el recorte final del JPEG no encaja
+        # con exactitud milimetrica en el ancho disponible. Limite de alto tambien fijado para
+        # que, junto con el resto del contenido de encima, quepa entero en la pagina 1.
+        ancho_mapa_general = min(doc.width - 1 * cm, 15.5 * cm)
+        imagen_general_flow = Image(
+            imagen_mapa_general, width=ancho_mapa_general, height=9.2 * cm, kind="proportional",
+        )
         imagen_general_flow.hAlign = "CENTER"
         story.append(KeepTogether([
             Paragraph("<i>Vista general: la finca y todos los focos detectados en la zona.</i>", estilo_matiz),
