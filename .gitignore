@@ -12,3 +12,6 @@ venv/
 # se genera aparte (ver README) y nunca se commitea
 data/*.gpkg
 data/*.geojson
+
+# estado en vivo del ranking de riesgo (para las flechas de subida/bajada) - se regenera solo
+data/ranking_historial.json

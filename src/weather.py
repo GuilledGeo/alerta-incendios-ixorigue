@@ -46,7 +46,14 @@ def obtener_meteo_reciente(lat: float, lon: float, horas: int = 6) -> pd.DataFra
     else:
         raise error
 
-    hourly = r.json()["hourly"]
+    cuerpo = r.json()
+    if "hourly" not in cuerpo:
+        # Open-Meteo puede responder 200 OK con un error de negocio en el cuerpo (parametros
+        # invalidos, limite de peticiones superado...) en vez de un status HTTP de error - eso
+        # no lo detecta raise_for_status() y sin esto se propagaria como un KeyError generico,
+        # dificil de distinguir de un fallo de red real al mirar los logs
+        raise ValueError(f"Open-Meteo respondio sin datos horarios: {cuerpo.get('reason', cuerpo)}")
+    hourly = cuerpo["hourly"]
     df = pd.DataFrame(hourly).rename(columns={
         "time": "fecha_hora",
         "winddirection_10m": "direccion_grados",

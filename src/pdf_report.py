@@ -479,14 +479,18 @@ def generar_pdf_aviso(
     # soplar el viento para empujar el fuego hacia la finca, ver interpretar_viento()
     bearing_foco_a_finca = bearing_deg(aviso_row["hotspot_lat"], aviso_row["hotspot_lon"], centroide.y, centroide.x)
 
+    motivo_sin_meteo = None
     try:
         meteo_24h = obtener_meteo_reciente(centroide.y, centroide.x, horas=24)
     except Exception as e:
         # obtener_meteo_reciente() ya reintenta 3 veces ante fallos transitorios de red - si
         # aun asi falla, mejor dejar rastro en los logs del servidor que tragarselo en
         # silencio, un informe para cliente sin datos meteorologicos es dificil de diagnosticar
-        # a posteriori sin saber que paso realmente aqui
-        print(f"[pdf_report] fallo obteniendo meteo para ({centroide.y}, {centroide.x}): {type(e).__name__}: {e}")
+        # a posteriori sin saber que paso realmente aqui. El motivo se guarda ademas para
+        # mostrarlo en el propio PDF (ver mas abajo) - en el despliegue publico (Streamlit
+        # Community Cloud) nadie con acceso al informe tiene tampoco acceso a estos logs
+        motivo_sin_meteo = f"{type(e).__name__}: {e}"
+        print(f"[pdf_report] fallo obteniendo meteo para ({centroide.y}, {centroide.x}): {motivo_sin_meteo}")
         meteo_24h = None
     hay_meteo_24h = meteo_24h is not None and not meteo_24h.empty
     # las ultimas 6h (radar de viento, tabla de KPIs) son un subconjunto de las 24h ya pedidas -
@@ -779,6 +783,8 @@ def generar_pdf_aviso(
             ))
     else:
         story.append(Paragraph("No se han podido obtener datos meteorológicos recientes para esta zona.", estilo_normal))
+        if motivo_sin_meteo:
+            story.append(Paragraph(f"<i>Motivo técnico: {motivo_sin_meteo}</i>", estilo_matiz))
 
     # las dos graficas (radar de viento + evolucion 24h) van una al lado de la otra, en una tabla
     # de 2 columnas envuelta en KeepTogether - asi ocupan menos alto (caben en la misma pagina
@@ -825,7 +831,7 @@ def generar_pdf_aviso(
         "evacuación de personas y ganado, las vías de salida despejadas, y contacte con "
         "emergencias (112) si fuera necesario. Si necesita ayuda o soporte para localizar a su "
         "ganado u otras cuestiones relacionadas con este informe, contacte con nuestro soporte "
-        "en el +34 638 53 62 31 o el +34 919 53 21 48.",
+        "en el +34 919 53 21 48.",
         estilo_pie_informe,
     ))
 

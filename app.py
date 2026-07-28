@@ -68,6 +68,7 @@ from src.firms_api import obtener_hotspots_firms_api
 from src.gee_hotspots import obtener_hotspots_gee
 from src.pdf_report import generar_pdf_aviso
 from src.ranches import obtener_ranchos_es, obtener_zonas_es
+from src.rank_history import calcular_cambios_ranking
 from src.risk import anillos_riesgo, bbox_vista_general, estado_foco, evaluar_riesgo
 
 st.set_page_config(page_title="Alerta de incendios — Ixorigue", layout="wide", page_icon="🔥", initial_sidebar_state="collapsed")
@@ -274,6 +275,39 @@ def _estado_foco_badge_html(ultima_deteccion) -> str:
     if not label:
         return ""
     return f'<span class="ix-badge" style="background-color:{color}">{label}</span>'
+
+
+def _texto_cambio_ranking(cambio) -> str:
+    """Version en texto plano (sin HTML) del cambio de posicion en el ranking - para la etiqueta
+    del st.expander, que no admite unsafe_allow_html. `cambio` es None cuando todavia no hay
+    resultado que mostrar (no deberia pasar salvo error, calcular_cambios_ranking() siempre
+    devuelve algo para cada ganaderia del ranking actual, incluido "nuevo" en el primer arranque)."""
+    if cambio is None:
+        return ""
+    tipo, delta = cambio
+    if tipo == "nuevo":
+        return "🆕 NUEVO"
+    if tipo == "sube":
+        return f"▲+{delta}"
+    if tipo == "baja":
+        return f"▼-{delta}"
+    return "▬="
+
+
+def _badge_cambio_ranking_html(cambio) -> str:
+    """Flecha de subida/bajada/nuevo/igual junto a la posicion en el ranking, a partir del
+    resultado de src.rank_history.calcular_cambios_ranking() para esa ganaderia. `cambio` es
+    None cuando todavia no hay historial previo con el que comparar (primer arranque de la app)."""
+    if cambio is None:
+        return ""
+    tipo, delta = cambio
+    if tipo == "nuevo":
+        return '<span class="ix-badge" style="background-color:#7c3aed">🆕 NUEVO</span>'
+    if tipo == "sube":
+        return f'<span class="ix-badge" style="background-color:#16a34a">▲ +{delta}</span>'
+    if tipo == "baja":
+        return f'<span class="ix-badge" style="background-color:#dc2626">▼ -{delta}</span>'
+    return '<span class="ix-badge" style="background-color:#6b7280">▬ =</span>'
 
 
 def _color_por_antiguedad(acq_datetime) -> tuple[str, str]:
@@ -770,18 +804,23 @@ with col_panel:
                 ranking["_urgencia"] = ranking["ultima_deteccion"].apply(_orden_urgencia)
                 ranking = ranking.sort_values(["_orden", "_urgencia", "distance_km"]).reset_index(drop=True)
                 st.caption(f"{len(ranking)} / {len(avisos)} ganaderías con foco a menos de 10 km, ordenadas de más a menos grave (y, dentro de cada nivel, focos activos antes que controlados).")
+                cambios_ranking = calcular_cambios_ranking(ranking, fetched_at)
 
                 for i, aviso in ranking.iterrows():
                     telefono = aviso.get("customer_phone")
                     _, _, estado_corto = _estado_foco(aviso.get("ultima_deteccion"))
                     estado_sufijo = f" · {estado_corto}" if estado_corto else ""
+                    cambio_ranking = cambios_ranking.get(str(aviso["ranch_id"]))
+                    texto_cambio = _texto_cambio_ranking(cambio_ranking)
+                    cambio_sufijo = f" · {texto_cambio}" if texto_cambio else ""
                     etiqueta = (
-                        f"#{i + 1} · {aviso['risk_level']}{estado_sufijo} · "
+                        f"#{i + 1} · {aviso['risk_level']}{estado_sufijo}{cambio_sufijo} · "
                         f"{aviso['ranch_name']} — {aviso['customer_name']}"
                     )
                     titulo = (
                         f'{_badge_html(aviso["risk_level"])} '
                         f'{_estado_foco_badge_html(aviso.get("ultima_deteccion"))} '
+                        f'{_badge_cambio_ranking_html(cambio_ranking)} '
                         f'&nbsp; <b>{aviso["ranch_name"]}</b> '
                         f'&nbsp;·&nbsp; {aviso["customer_name"]}'
                         + (f" &nbsp;·&nbsp; 📞 {telefono}" if pd.notna(telefono) and telefono else "")

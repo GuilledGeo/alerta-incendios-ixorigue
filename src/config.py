@@ -32,11 +32,13 @@ RING_RISK = {
     "5-10 km": "1/3",
 }
 
+# semaforo visto desde fuera hacia dentro: 5-10 km verde (menor riesgo), 3-5 km amarillo,
+# 0-3 km / dentro rojo (mayor riesgo) - ver conversacion 2026-07-28
 COLORS_RING = {
     "Dentro (0 km)": "#d62728",
-    "0-3 km": "#06d6a0",
-    "3-5 km": "#ef476f",
-    "5-10 km": "#ffd166",
+    "0-3 km": "#d62728",
+    "3-5 km": "#ffd166",
+    "5-10 km": "#06d6a0",
 }
 
 CARDINAL_ES = {
