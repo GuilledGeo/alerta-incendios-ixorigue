@@ -1,12 +1,24 @@
 import geopandas as gpd
 import pandas as pd
+from pyproj import Geod
 from shapely.geometry import Point, box
+from shapely.ops import nearest_points
 
 from .config import CARDINAL_ES, RING_RISK, RING_THRESHOLDS_KM
 from .fires import formatear_duracion, formatear_hace
 from .geo_utils import bearing_deg, bearing_to_cardinal
 
-CRS_METRICO = "EPSG:3857"  # suficiente para distancias cortas (<50 km) sin distorsion relevante
+# EPSG:3857 (Web Mercator) NO es equidistante: a la latitud de España (~36-43N) infla las
+# distancias medidas directamente sobre sus coordenadas en ~un 25-38% (factor 1/cos(latitud)) -
+# bug real detectado el 29-jul-2026 comparando con una medicion manual (un foco a 7.96 km reales
+# salia calculado como 10.45 km, sacando de la lista de riesgo una ganaderia que si estaba dentro
+# del perimetro de 10 km). EPSG:25830 (ETRS89 / UTM huso 30N, el de referencia oficial para la
+# España peninsular) tiene una distorsion de <1% para estas distancias cortas - se usa aqui para
+# el filtro espacial (sjoin) y como base antes de refinar con la distancia geodesica exacta
+# (Geod.inv, sin proyeccion, la unica realmente libre de distorsion en cualquier punto de España
+# incluidas Canarias/Baleares) que se calcula en evaluar_riesgo() para el numero final reportado.
+CRS_METRICO = "EPSG:25830"
+_GEOD = Geod(ellps="WGS84")
 
 # umbrales (horas desde la ultima deteccion satelital del foco) para diferenciar los avisos
 # que siguen activos de los que probablemente ya estan controlados/extinguidos - compartido
@@ -43,8 +55,17 @@ ANILLOS_LABELS = ["0-3 km", "3-5 km", "5-10 km"]  # deben coincidir en orden con
 def anillos_riesgo(rancho_geom):
     """Buffers del perimetro del rancho a 3/5/10 km (zonas de seguridad), en el mismo sistema de
     distancias que usa evaluar_riesgo() (distancia al perimetro, no al centroide). Compartida
-    entre app.py (mini-mapa Folium) y src/pdf_report.py (mapa estatico del informe PDF)."""
-    base_m = gpd.GeoSeries([rancho_geom], crs="EPSG:4326").to_crs(CRS_METRICO)
+    entre app.py (mini-mapa Folium) y src/pdf_report.py (mapa estatico del informe PDF).
+
+    Proyeccion azimutal equidistante CENTRADA EN EL PROPIO RANCHO (no CRS_METRICO/UTM fijo) -
+    por construccion, las distancias medidas DESDE EL CENTRO de esta proyeccion son exactas en
+    cualquier punto de España (Canarias incluidas), sin el ~1% de distorsion residual que
+    tendria un huso UTM fijo lejos de su meridiano central. El ranch_geom real puede estar a
+    unos pocos km de su propio centroide (el punto que centra la proyeccion), un margen de
+    error totalmente despreciable para radios de 3-10 km."""
+    centro = rancho_geom.centroid
+    crs_local = f"+proj=aeqd +lat_0={centro.y} +lon_0={centro.x} +x_0=0 +y_0=0 +datum=WGS84 +units=m +no_defs"
+    base_m = gpd.GeoSeries([rancho_geom], crs="EPSG:4326").to_crs(crs_local)
     return [
         (label, base_m.buffer(km * 1000).to_crs("EPSG:4326").iloc[0])
         for km, label in zip(RING_THRESHOLDS_KM, ANILLOS_LABELS)
@@ -122,7 +143,14 @@ def evaluar_riesgo(ranchos: gpd.GeoDataFrame, hotspots: pd.DataFrame) -> pd.Data
         crs="EPSG:4326",
     ).to_crs(CRS_METRICO).reset_index(drop=True)
 
-    radio_max_m = RING_THRESHOLDS_KM[-1] * 1000
+    # +10% de margen sobre el radio real: CRS_METRICO (EPSG:25830, UTM huso 30N) tiene una
+    # distorsion residual pequeña pero no nula lejos de su meridiano central (p.ej. Canarias,
+    # extremo este de Baleares) - sin este margen, el sjoin de abajo podria excluir por poco
+    # algun par que si esta dentro de los 10 km reales. El filtro exacto de verdad (dist_km >
+    # RING_THRESHOLDS_KM[-1]) sigue aplicandose despues con la distancia geodesica ya corregida,
+    # este radio solo decide que candidatos entran a esa comprobacion, un falso positivo aqui no
+    # tiene coste (se descarta enseguida), un falso negativo si (se perderia el aviso entero)
+    radio_max_m = RING_THRESHOLDS_KM[-1] * 1000 * 1.1
 
     # candidate set via indice espacial (STRtree de GeoPandas) en vez de comparar cada rancho
     # contra cada hotspot en Python puro: sjoin de los hotspots contra el buffer de 10km de cada
@@ -144,10 +172,18 @@ def evaluar_riesgo(ranchos: gpd.GeoDataFrame, hotspots: pd.DataFrame) -> pd.Data
         centroid_4326 = ranchos.geometry.loc[i].centroid
         hs_geom_m = hotspots_geom.loc[j]
 
-        # shapely Polygon.distance(Point) ya devuelve la distancia al punto del poligono
-        # (borde de la zona) mas cercano al hotspot, no al centroide - es lo que se necesita
-        # para saber cuanto margen real queda hasta que el fuego toque la finca
-        dist_m = rancho.geometry.distance(hs_geom_m)
+        # distancia geodesica REAL (elipsoide WGS84, sin proyeccion) entre el punto del
+        # poligono (borde de la zona, no el centroide) mas cercano al hotspot y el hotspot -
+        # bug real corregido el 29-jul-2026: usar directamente rancho.geometry.distance() sobre
+        # coordenadas proyectadas (antes EPSG:3857) da la distancia en las unidades DE ESA
+        # PROYECCION, no en metros reales; a la latitud de España eso inflaba la distancia
+        # hasta un ~31% (verificado con Web Mercator). Aqui solo se usa la proyeccion para
+        # encontrar QUE punto del poligono es el mas cercano (una operacion geometrica, no
+        # necesita ser exacta en distancia) - el numero que de verdad importa se recalcula
+        # despues con Geod.inv(), la unica forma libre de distorsion en cualquier punto de España
+        punto_cercano_m = nearest_points(rancho.geometry, hs_geom_m)[0]
+        punto_cercano_4326 = gpd.GeoSeries([punto_cercano_m], crs=CRS_METRICO).to_crs("EPSG:4326").iloc[0]
+        _, _, dist_m = _GEOD.inv(punto_cercano_4326.x, punto_cercano_4326.y, hs["longitude"], hs["latitude"])
         dist_km = dist_m / 1000.0
         if dist_km > RING_THRESHOLDS_KM[-1]:
             # el buffer poligonal usado para el sjoin es una aproximacion del circulo real
