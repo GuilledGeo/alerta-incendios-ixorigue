@@ -56,7 +56,17 @@ def _abrir_hoja(cliente):
         return spreadsheet.add_worksheet(title=_HOJA_NOMBRE, rows=1, cols=1)
 
 
-def _cargar_historial() -> dict:
+def _cargar_historial() -> tuple[dict, bool]:
+    """Devuelve (historial, fallo_lectura). `fallo_lectura=True` indica que hubo un error REAL
+    leyendo Google Sheets (cuota agotada, hipo de red, JSON corrupto...) - en ese caso el
+    historial devuelto es un placeholder vacio, solo para poder seguir mostrando algo en pantalla
+    en este render, pero el llamante NUNCA debe usarlo para sobreescribir el historial guardado.
+    Bug real corregido el 29-jul-2026: antes, un fallo de lectura simplemente PUNTUAL (nada que
+    ver con que de verdad no hubiera historial) se trataba exactamente igual que "primer
+    arranque", y como calcular_cambios_ranking() siempre sobreescribe el historial cuando ve
+    cambios, eso BORRABA PARA SIEMPRE el historial real bueno con un estado "todo nuevo" en
+    cuanto Google Sheets fallaba una sola vez en leer - convirtiendo un problema transitorio de
+    red en una perdida de datos permanente e irreversible."""
     try:
         cliente = _cliente_sheets()
     except Exception as e:
@@ -66,19 +76,23 @@ def _cargar_historial() -> dict:
     if cliente is not None:
         try:
             valor = _abrir_hoja(cliente).acell(_CELDA).value
-            return json.loads(valor) if valor else {"fetched_at": None, "ranks": {}}
+            historial = json.loads(valor) if valor else {"fetched_at": None, "ranks": {}}
+            return historial, False
         except Exception as e:
-            # Google Sheets configurado pero fallo puntual (rate limit, hoja no compartida con
-            # la cuenta de servicio, sin red...) - se cae al archivo local en vez de romper el
-            # ranking de la app entera por un problema de persistencia
+            # Google Sheets esta configurada pero ha fallado la lectura esta vez (rate limit,
+            # hoja no compartida con la cuenta de servicio, sin red, JSON corrupto...) - NO se
+            # cae al archivo local (en el despliegue publico ademas casi nunca existira, al no
+            # tener disco persistente): confundir esto con "no hay historial" es precisamente
+            # el bug de mas arriba. Se marca como fallo para que el llamante no persista nada.
             print(f"[rank_history] fallo leyendo historial de Google Sheets: {type(e).__name__}: {e}")
+            return {"fetched_at": None, "ranks": {}}, True
 
     if not RANK_HISTORY_PATH.exists():
-        return {"fetched_at": None, "ranks": {}}
+        return {"fetched_at": None, "ranks": {}}, False
     try:
-        return json.loads(RANK_HISTORY_PATH.read_text(encoding="utf-8"))
+        return json.loads(RANK_HISTORY_PATH.read_text(encoding="utf-8")), False
     except Exception:
-        return {"fetched_at": None, "ranks": {}}
+        return {"fetched_at": None, "ranks": {}}, True
 
 
 def _guardar_historial(fetched_at_iso: str, ranks: dict) -> None:
@@ -112,8 +126,13 @@ def calcular_cambios_ranking(ranking_actual: pd.DataFrame, fetched_at) -> dict:
 
     `fetched_at` es el timestamp (UTC) de la consulta de hotspots vigente (src/config._cargar_
     hotspots* en app.py) - solo se usa para dejar constancia de cuando se guardo por ultima vez,
-    no afecta a la logica de arriba."""
-    historial = _cargar_historial()
+    no afecta a la logica de arriba.
+
+    Si falla la LECTURA del historial (ver _cargar_historial), esta funcion sigue devolviendo
+    algo mostrable ("nuevo" para todos, en el peor caso) pero NUNCA sobreescribe lo guardado -
+    un fallo transitorio de Google Sheets no debe borrar el historial real bueno, se autocorrige
+    solo en el proximo ciclo en el que la lectura funcione."""
+    historial, fallo_lectura = _cargar_historial()
     previos = historial.get("ranks") or {}
 
     ranks_actuales = {str(rid): i + 1 for i, rid in enumerate(ranking_actual["ranch_id"])}
@@ -142,7 +161,7 @@ def calcular_cambios_ranking(ranking_actual: pd.DataFrame, fetched_at) -> dict:
             hay_cambios_que_guardar = True
         nuevo_estado[rid] = {"rank": rank_actual, "tipo": tipo, "delta": delta}
 
-    if hay_cambios_que_guardar:
+    if hay_cambios_que_guardar and not fallo_lectura:
         fetched_at_iso = fetched_at.isoformat() if fetched_at is not None else None
         _guardar_historial(fetched_at_iso, nuevo_estado)
 
