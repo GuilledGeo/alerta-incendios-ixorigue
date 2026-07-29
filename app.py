@@ -298,8 +298,10 @@ def _estado_foco_badge_html(ultima_deteccion) -> str:
 def _texto_cambio_ranking(cambio) -> str:
     """Version en texto plano (sin HTML) del cambio de posicion en el ranking - para la etiqueta
     del st.expander, que no admite unsafe_allow_html. `cambio` es None cuando todavia no hay
-    resultado que mostrar (no deberia pasar salvo error, calcular_cambios_ranking() siempre
-    devuelve algo para cada ganaderia del ranking actual, incluido "nuevo" en el primer arranque)."""
+    resultado que mostrar (no deberia pasar, calcular_cambios_ranking() siempre devuelve algo
+    para cada ganaderia del ranking actual). No hay caso "sin cambios": mientras una ganaderia no
+    cambie de puesto respecto a su ultimo cambio real, se repite la misma flecha de siempre - ver
+    src/rank_history.py."""
     if cambio is None:
         return ""
     tipo, delta = cambio
@@ -307,15 +309,13 @@ def _texto_cambio_ranking(cambio) -> str:
         return "🆕 Nuevo"
     if tipo == "sube":
         return f"🔼{delta}"
-    if tipo == "baja":
-        return f"🔽{delta}"
-    return "➖"
+    return f"🔽{delta}"
 
 
 def _badge_cambio_ranking_html(cambio) -> str:
-    """Flecha de subida/bajada/nuevo/igual junto a la posicion en el ranking, a partir del
-    resultado de src.rank_history.calcular_cambios_ranking() para esa ganaderia. `cambio` es
-    None cuando todavia no hay historial previo con el que comparar (primer arranque de la app)."""
+    """Flecha de subida/bajada/nuevo junto a la posicion en el ranking, a partir del resultado de
+    src.rank_history.calcular_cambios_ranking() para esa ganaderia. `cambio` es None cuando
+    todavia no hay resultado que mostrar (no deberia pasar)."""
     if cambio is None:
         return ""
     tipo, delta = cambio
@@ -323,9 +323,7 @@ def _badge_cambio_ranking_html(cambio) -> str:
         return '<span class="ix-badge" style="background-color:#7c3aed">🆕 Nuevo</span>'
     if tipo == "sube":
         return f'<span class="ix-badge" style="background-color:#16a34a">🔼 {delta}</span>'
-    if tipo == "baja":
-        return f'<span class="ix-badge" style="background-color:#dc2626">🔽 {delta}</span>'
-    return '<span class="ix-badge" style="background-color:#6b7280">➖</span>'
+    return f'<span class="ix-badge" style="background-color:#dc2626">🔽 {delta}</span>'
 
 
 def _color_por_antiguedad(acq_datetime) -> tuple[str, str]:

@@ -5,10 +5,12 @@ import pandas as pd
 
 from .config import DATA_DIR, RANK_HISTORY_SHEET_ID
 
-# guarda el ranking de la ULTIMA consulta de hotspots (no cada rerun de Streamlit) para poder
-# mostrar flechas de subida/bajada de posicion en el ranking de riesgo de app.py - ver
-# conversacion 2026-07-28. Un JSON simple basta: una fila por ranch_id, se sobreescribe entero
-# en cada ciclo de datos nuevo (no hace falta historial mas alla del ciclo anterior)
+# guarda, por ganaderia, la posicion Y la flecha (tipo/delta) del ULTIMO CAMBIO REAL de puesto en
+# el ranking de riesgo de app.py - ver conversacion 2026-07-28/29. Mientras la posicion no cambie
+# respecto a ese ultimo cambio real, se seguimos devolviendo la MISMA flecha (no un "se mantiene"
+# neutro): el usuario prefiere ver "sigue subida desde la ultima vez que se movio" antes que ver
+# la flecha desaparecer nada mas dejar de moverse durante un ciclo. Solo se sobreescribe el
+# estado guardado de una ganaderia cuando de verdad cambia de puesto.
 RANK_HISTORY_PATH = DATA_DIR / "ranking_historial.json"
 
 # si RANK_HISTORY_SHEET_ID esta configurada, el historial se guarda en esa Google Sheet en vez
@@ -101,35 +103,47 @@ def _guardar_historial(fetched_at_iso: str, ranks: dict) -> None:
 
 def calcular_cambios_ranking(ranking_actual: pd.DataFrame, fetched_at) -> dict:
     """Compara el orden actual del ranking (ya ordenado por riesgo/urgencia/distancia, una fila
-    por ganaderia) contra el guardado en el ciclo de datos anterior, y devuelve
-    {ranch_id: (tipo, delta)} con tipo en {"nuevo", "sube", "baja", "igual"} - en el primerisimo
-    arranque (sin historial en disco todavia) toda ganaderia sale como "nuevo", igual que
-    cualquier ganaderia que entre en el ranking por primera vez en ciclos posteriores.
+    por ganaderia) contra el puesto que tenia en el ULTIMO CAMBIO REAL guardado, y devuelve
+    {ranch_id: (tipo, delta)} con tipo en {"nuevo", "sube", "baja"} - no existe un tipo "igual":
+    mientras una ganaderia no cambie de puesto respecto a su ultimo cambio real, se repite tal
+    cual la misma flecha que ya tenia (no desaparece ni se sustituye por un "se mantiene" neutro).
+    Solo cuando de verdad cambia de puesto se actualiza tanto la flecha mostrada como el punto de
+    referencia contra el que se comparara la proxima vez.
 
     `fetched_at` es el timestamp (UTC) de la consulta de hotspots vigente (src/config._cargar_
-    hotspots* en app.py, cacheada 15 min) - el historial solo se sobreescribe cuando este
-    timestamp cambia respecto al guardado, de forma que las flechas se mantienen estables
-    mientras Streamlit re-renderiza con los mismos hotspots en cache, y solo se recalculan
-    quando de verdad llega un ciclo de datos nuevo (o al dia siguiente)."""
-    fetched_at_iso = fetched_at.isoformat() if fetched_at is not None else None
+    hotspots* en app.py) - solo se usa para dejar constancia de cuando se guardo por ultima vez,
+    no afecta a la logica de arriba."""
     historial = _cargar_historial()
-    ranks_previos = historial.get("ranks") or {}
+    previos = historial.get("ranks") or {}
 
     ranks_actuales = {str(rid): i + 1 for i, rid in enumerate(ranking_actual["ranch_id"])}
 
     cambios = {}
+    nuevo_estado = {}
+    hay_cambios_que_guardar = False
     for rid, rank_actual in ranks_actuales.items():
-        rank_previo = ranks_previos.get(rid)
-        if rank_previo is None:
-            cambios[rid] = ("nuevo", None)
-        elif rank_previo > rank_actual:
-            cambios[rid] = ("sube", rank_previo - rank_actual)
-        elif rank_previo < rank_actual:
-            cambios[rid] = ("baja", rank_actual - rank_previo)
-        else:
-            cambios[rid] = ("igual", 0)
+        prev = previos.get(rid)
+        # formato antiguo (solo un int, sin flecha guardada) o ganaderia nunca vista: se trata
+        # como si no hubiera historial previo, un unico "nuevo" de transicion
+        prev_rank = prev.get("rank") if isinstance(prev, dict) else None
 
-    if fetched_at_iso is not None and historial.get("fetched_at") != fetched_at_iso:
-        _guardar_historial(fetched_at_iso, ranks_actuales)
+        if prev_rank is None:
+            tipo, delta = "nuevo", None
+        elif prev_rank > rank_actual:
+            tipo, delta = "sube", prev_rank - rank_actual
+        elif prev_rank < rank_actual:
+            tipo, delta = "baja", rank_actual - prev_rank
+        else:
+            # sin cambio de puesto: se repite la ULTIMA flecha real guardada, no un "igual"
+            tipo, delta = prev.get("tipo", "nuevo"), prev.get("delta")
+
+        cambios[rid] = (tipo, delta)
+        if prev_rank != rank_actual or prev is None:
+            hay_cambios_que_guardar = True
+        nuevo_estado[rid] = {"rank": rank_actual, "tipo": tipo, "delta": delta}
+
+    if hay_cambios_que_guardar:
+        fetched_at_iso = fetched_at.isoformat() if fetched_at is not None else None
+        _guardar_historial(fetched_at_iso, nuevo_estado)
 
     return cambios
