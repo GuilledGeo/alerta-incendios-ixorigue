@@ -297,10 +297,14 @@ def _estado_foco_badge_html(ultima_deteccion) -> str:
 
 def _texto_cambio_ranking(cambio) -> str:
     """Version en texto plano (sin HTML) del cambio de posicion en el ranking - para la etiqueta
-    del st.expander, que no admite unsafe_allow_html. `cambio` es None cuando todavia no hay
-    resultado que mostrar (no deberia pasar, calcular_cambios_ranking() siempre devuelve algo
-    para cada ganaderia del ranking actual). No hay caso "sin cambios": mientras una ganaderia no
-    cambie de puesto respecto a su ultimo cambio real, se repite la misma flecha de siempre - ver
+    del st.expander, que no admite unsafe_allow_html (ni por tanto colorear el emoji ▲/▼ en si,
+    que se renderiza en el color por defecto del emoji-set de cada plataforma) - se antepone un
+    circulo de color rojo/verde (si renderizados en rojo/verde real en cualquier plataforma) para
+    dar la misma lectura "sube=peligro/rojo, baja=alivio/verde" que la version con HTML de
+    _badge_cambio_ranking_html(). `cambio` es None cuando todavia no hay resultado que mostrar
+    (no deberia pasar, calcular_cambios_ranking() siempre devuelve algo para cada ganaderia del
+    ranking actual). No hay caso "sin cambios": mientras una ganaderia no cambie de puesto
+    respecto a su ultimo cambio real, se repite la misma flecha de siempre - ver
     src/rank_history.py."""
     if cambio is None:
         return ""
@@ -308,8 +312,9 @@ def _texto_cambio_ranking(cambio) -> str:
     if tipo == "nuevo":
         return "🆕 Nuevo"
     if tipo == "sube":
-        return f"🔼{delta}"
-    return f"🔽{delta}"
+        # sube puestos en el ranking de RIESGO = mas peligro = rojo
+        return f"🔴▲{delta}"
+    return f"🟢▼{delta}"
 
 
 def _badge_cambio_ranking_html(cambio) -> str:
@@ -322,8 +327,10 @@ def _badge_cambio_ranking_html(cambio) -> str:
     if tipo == "nuevo":
         return '<span class="ix-badge" style="background-color:#7c3aed">🆕 Nuevo</span>'
     if tipo == "sube":
-        return f'<span class="ix-badge" style="background-color:#16a34a">🔼 {delta}</span>'
-    return f'<span class="ix-badge" style="background-color:#dc2626">🔽 {delta}</span>'
+        # sube puestos en el ranking de RIESGO = mas peligro = rojo (no verde, aunque "subir"
+        # suene a positivo en otros contextos) - y bajar puestos = menos peligro = verde
+        return f'<span class="ix-badge" style="background-color:#dc2626">🔼 {delta}</span>'
+    return f'<span class="ix-badge" style="background-color:#16a34a">🔽 {delta}</span>'
 
 
 def _color_por_antiguedad(acq_datetime) -> tuple[str, str]:
