@@ -486,14 +486,30 @@ def generar_pdf_aviso(
         print(f"[pdf_report] fallo obteniendo meteo para ({centroide.y}, {centroide.x}): {motivo_sin_meteo}")
         meteo_24h = None
     hay_meteo_24h = meteo_24h is not None and not meteo_24h.empty
-    # las ultimas 6h (radar de viento, tabla de KPIs) son un subconjunto de las 24h ya pedidas -
-    # una sola llamada a Open-Meteo en vez de dos
+    # temperatura/humedad/precipitacion SI tiene sentido medirlas en la finca (son las
+    # condiciones de fondo de la propia finca) - las ultimas 6h son un subconjunto de las 24h ya
+    # pedidas, una sola llamada a Open-Meteo en vez de dos
     meteo_df = meteo_24h.tail(6).reset_index(drop=True) if hay_meteo_24h else None
     hay_meteo = meteo_df is not None and not meteo_df.empty
 
+    # el VIENTO, en cambio, se pide en la ubicacion del FOCO (no de la finca): lo que importa
+    # para saber si el fuego avanza hacia la finca es hacia donde sopla el viento justo donde
+    # esta ardiendo, no en la finca - pueden ser direcciones bastante distintas (terreno,
+    # microclima local...) y el viento en la finca no dice nada sobre hacia donde empuja el
+    # fuego. Llamada aparte (mismo cache de weather.py, asi que si finca y foco caen en la misma
+    # celda de ~1km no se duplica la peticion de verdad)
+    motivo_sin_viento = None
+    try:
+        meteo_foco_6h = obtener_meteo_reciente(aviso_row["hotspot_lat"], aviso_row["hotspot_lon"], horas=6)
+    except Exception as e:
+        motivo_sin_viento = f"{type(e).__name__}: {e}"
+        print(f"[pdf_report] fallo obteniendo meteo del foco para viento ({aviso_row['hotspot_lat']}, {aviso_row['hotspot_lon']}): {motivo_sin_viento}")
+        meteo_foco_6h = None
+    hay_viento = meteo_foco_6h is not None and not meteo_foco_6h.empty
+
     rodeado, texto_rodeado = detectar_rodeado(rancho_row["geometry"], hotspots_cercanos)
     piezas_riesgo = interpretar_riesgo(aviso_row, hotspots_mismo_fuego)
-    viento = interpretar_viento(meteo_df, bearing_foco_a_finca) if hay_meteo else interpretar_viento(None, None)
+    viento = interpretar_viento(meteo_foco_6h, bearing_foco_a_finca) if hay_viento else interpretar_viento(None, None)
     # rumbo DESDE LA FINCA HACIA EL FOCO (el inverso del anterior) - para senalar en el radar de
     # viento en que direccion esta el foco activo respecto a la finca
     bearing_finca_a_foco = bearing_deg(centroide.y, centroide.x, aviso_row["hotspot_lat"], aviso_row["hotspot_lon"])
@@ -506,7 +522,7 @@ def generar_pdf_aviso(
         imagen_mapa_anillos = _mapa_anillos(rancho_row, hotspots_cercanos, aviso_row)
     except Exception:
         imagen_mapa_anillos = None
-    imagen_viento = _grafico_viento(meteo_df, bearing_foco_a_finca, bearing_finca_a_foco) if hay_meteo else None
+    imagen_viento = _grafico_viento(meteo_foco_6h, bearing_foco_a_finca, bearing_finca_a_foco) if hay_viento else None
     try:
         imagen_meteo_24h = _grafico_meteo_24h(meteo_24h) if hay_meteo_24h else None
     except Exception:
@@ -750,13 +766,15 @@ def generar_pdf_aviso(
     if hay_meteo:
         temp_media, temp_max = meteo_df["temp_c"].mean(), meteo_df["temp_c"].max()
         humedad_media, humedad_min = meteo_df["humedad_pct"].mean(), meteo_df["humedad_pct"].min()
-        racha_max = meteo_df["rafaga_kmh"].max()
         precip_acum = meteo_df["precipitacion_mm"].sum()
+        # racha de viento: en el foco, no en la finca (ver comentario mas arriba) - puede
+        # faltar aunque el resto de la tabla si tenga datos (dos llamadas independientes)
+        racha_txt = f"{meteo_foco_6h['rafaga_kmh'].max():.0f} km/h" if hay_viento else "—"
 
         datos_meteo = [
-            ["Temp. media", "Humedad media", "Racha máx. viento", "Precipitación (6h)"],
+            ["Temp. media", "Humedad media", "Racha máx. viento (en el foco)", "Precipitación (6h)"],
             [f"{temp_media:.0f}°C (máx {temp_max:.0f}°C)", f"{humedad_media:.0f}% (mín {humedad_min:.0f}%)",
-             f"{racha_max:.0f} km/h", f"{precip_acum:.1f} mm"],
+             racha_txt, f"{precip_acum:.1f} mm"],
         ]
         tabla_meteo = Table(datos_meteo, colWidths=[doc.width / 4] * 4)
         tabla_meteo.setStyle(TableStyle([

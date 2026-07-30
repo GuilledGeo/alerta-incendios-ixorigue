@@ -440,14 +440,17 @@ def _grafico_temp_humedad_interactivo(meteo_df: pd.DataFrame) -> go.Figure:
     fig.update_layout(
         paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
         title=dict(text="🌡️💧 Temperatura y humedad — últimas 24h", font=dict(size=13, color=COLOR_TEXTO)),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0, font=dict(color=COLOR_TEXTO)),
-        xaxis=dict(tickfont=dict(color=COLOR_TEXTO, size=9), gridcolor="rgba(255,255,255,0.1)"),
+        showlegend=False,
+        xaxis=dict(
+            title=dict(text="Hora", font=dict(color=COLOR_TEXTO)),
+            tickfont=dict(color=COLOR_TEXTO, size=9), gridcolor="rgba(255,255,255,0.1)",
+        ),
         yaxis=dict(
-            title=dict(text="°C", font=dict(color="#ef4444")), tickfont=dict(color="#ef4444"),
+            title=dict(text="Temperatura (°C)", font=dict(color="#ef4444")), tickfont=dict(color="#ef4444"),
             gridcolor="rgba(255,255,255,0.1)",
         ),
         yaxis2=dict(
-            title=dict(text="%", font=dict(color="#3b82f6")), tickfont=dict(color="#3b82f6"),
+            title=dict(text="Humedad relativa (%)", font=dict(color="#3b82f6")), tickfont=dict(color="#3b82f6"),
             overlaying="y", side="right", showgrid=False,
         ),
         margin=dict(t=60, b=10, l=10, r=10), height=340,
@@ -1108,13 +1111,31 @@ with col_panel:
                                         # 72h (no 24h): la precipitacion acumulada que se muestra
                                         # abajo es a 72h, hace falta pedir esa ventana entera -
                                         # las graficas de evolucion se quedan con las ultimas 24h
-                                        # de este mismo dataframe, sin pedirlas aparte
+                                        # de este mismo dataframe, sin pedirlas aparte. Temperatura/
+                                        # humedad/precipitacion SI tiene sentido pedirlas en la
+                                        # finca (son las condiciones de fondo de la propia finca)
                                         try:
                                             meteo_72h = obtener_meteo_reciente(centroide.y, centroide.x, horas=72)
                                             motivo_sin_meteo = None
                                         except Exception as e:
                                             meteo_72h, motivo_sin_meteo = None, f"{type(e).__name__}: {e}"
-                                        st.session_state[key_meteo_datos] = (meteo_72h, motivo_sin_meteo)
+                                        # el VIENTO, en cambio, se pide en la ubicacion del FOCO,
+                                        # no de la finca: lo que importa para saber si el fuego
+                                        # avanza hacia la finca es hacia donde sopla el viento
+                                        # justo donde esta ardiendo, no en la finca - pueden ser
+                                        # direcciones bastante distintas (terreno, microclima
+                                        # local...) y el viento en la finca no dice nada sobre
+                                        # hacia donde empuja el fuego
+                                        try:
+                                            meteo_foco_6h = obtener_meteo_reciente(
+                                                aviso["hotspot_lat"], aviso["hotspot_lon"], horas=6,
+                                            )
+                                            motivo_sin_viento = None
+                                        except Exception as e:
+                                            meteo_foco_6h, motivo_sin_viento = None, f"{type(e).__name__}: {e}"
+                                        st.session_state[key_meteo_datos] = (
+                                            meteo_72h, motivo_sin_meteo, meteo_foco_6h, motivo_sin_viento,
+                                        )
                                 st.session_state[key_meteo_visible] = nuevo_estado
                                 st.session_state[key_expander_abierto] = True
                                 st.rerun()
@@ -1151,12 +1172,13 @@ with col_panel:
                         if st.session_state[key_meteo_visible] and key_meteo_datos in st.session_state:
                             # datos ya obtenidos (y cacheados en session_state) al pulsar el
                             # boton de arriba - no se vuelve a llamar a Open-Meteo en cada rerun.
-                            # Mismo punto (centroide de la finca) que usa
-                            # src/pdf_report.py:generar_pdf_aviso - una sola fuente de verdad
-                            # para "de donde sale la meteo de la finca" (aunque las ventanas de
-                            # los KPIs de aqui son distintas a las del PDF, a peticion expresa:
-                            # instantaneo en vez de medias donde tiene mas sentido para el lector)
-                            meteo_72h, motivo_sin_meteo = st.session_state[key_meteo_datos]
+                            # Temperatura/humedad/precipitacion en la finca (condiciones de
+                            # fondo de la propia finca); el VIENTO en la ubicacion del FOCO, no
+                            # de la finca - lo que importa para saber si el fuego avanza hacia la
+                            # finca es hacia donde sopla el viento justo donde esta ardiendo, que
+                            # puede ser una direccion bastante distinta a la de la finca (terreno,
+                            # microclima local...). Mismo criterio que src/pdf_report.py.
+                            meteo_72h, motivo_sin_meteo, meteo_foco_6h, motivo_sin_viento = st.session_state[key_meteo_datos]
                             centroide = rancho_row["geometry"].centroid
                             bearing_foco_a_finca = bearing_deg(
                                 aviso["hotspot_lat"], aviso["hotspot_lon"], centroide.y, centroide.x,
@@ -1168,13 +1190,10 @@ with col_panel:
                                 centroide.y, centroide.x, aviso["hotspot_lat"], aviso["hotspot_lon"],
                             )
                             hay_meteo = meteo_72h is not None and not meteo_72h.empty
-                            # interpretar_viento() sigue trabajando sobre las ultimas 6h (media
-                            # representativa de tendencia reciente) - solo los 4 KPIs de abajo
-                            # cambian a instantaneo/2h/72h
-                            meteo_df_6h = meteo_72h.tail(6).reset_index(drop=True) if hay_meteo else None
-                            viento = interpretar_viento(meteo_df_6h, bearing_foco_a_finca) if hay_meteo else interpretar_viento(None, None)
+                            hay_viento = meteo_foco_6h is not None and not meteo_foco_6h.empty
+                            viento = interpretar_viento(meteo_foco_6h, bearing_foco_a_finca) if hay_viento else interpretar_viento(None, None)
 
-                            st.markdown("**🌤️ Condiciones meteorológicas de la finca**")
+                            st.markdown("**🌤️ Condiciones meteorológicas**")
                             if viento["frase_velocidad"]:
                                 st.markdown(f"**{viento['frase_velocidad']}**")
                             if viento["frase_direccion"]:
@@ -1183,14 +1202,17 @@ with col_panel:
                             if hay_meteo:
                                 temp_ahora = meteo_72h["temp_c"].iloc[-1]
                                 humedad_ahora = meteo_72h["humedad_pct"].iloc[-1]
-                                racha_media_2h = meteo_72h["rafaga_kmh"].tail(2).mean()
+                                racha_media_2h = meteo_foco_6h["rafaga_kmh"].tail(2).mean() if hay_viento else None
                                 precip_72h = meteo_72h["precipitacion_mm"].sum()
 
                                 cm1, cm2, cm3, cm4 = st.columns(4)
-                                cm1.metric("Temp. ahora", f"{temp_ahora:.0f}°C")
-                                cm2.metric("Humedad ahora", f"{humedad_ahora:.0f}%")
-                                cm3.metric("Racha viento (2h)", f"{racha_media_2h:.0f} km/h")
-                                cm4.metric("Precipitación (72h)", f"{precip_72h:.1f} mm")
+                                cm1.metric("Temp. ahora (finca)", f"{temp_ahora:.0f}°C")
+                                cm2.metric("Humedad ahora (finca)", f"{humedad_ahora:.0f}%")
+                                cm3.metric(
+                                    "Racha viento (2h, en el foco)",
+                                    f"{racha_media_2h:.0f} km/h" if racha_media_2h is not None else "—",
+                                )
+                                cm4.metric("Precipitación (72h, finca)", f"{precip_72h:.1f} mm")
                                 if humedad_ahora < 30:
                                     st.caption("La humedad relativa es baja, lo que favorece la propagación del fuego.")
 
@@ -1205,9 +1227,15 @@ with col_panel:
                                     # radar/brujula de viento interactivo (Plotly, con zoom/hover
                                     # al pasar el raton) - a diferencia del informe PDF, que usa
                                     # una imagen PNG estatica (matplotlib), aqui se puede
-                                    # interactuar igual que con las graficas de linea de al lado
-                                    fig_viento = _grafico_viento_interactivo(meteo_df_6h, bearing_foco_a_finca, bearing_finca_a_foco)
-                                    st.plotly_chart(fig_viento, width="stretch", key=f"viento_radar_{aviso['ranch_id']}")
+                                    # interactuar igual que con las graficas de linea de al lado.
+                                    # Datos del FOCO, no de la finca (ver comentario mas arriba)
+                                    if hay_viento:
+                                        fig_viento = _grafico_viento_interactivo(meteo_foco_6h, bearing_foco_a_finca, bearing_finca_a_foco)
+                                        st.plotly_chart(fig_viento, width="stretch", key=f"viento_radar_{aviso['ranch_id']}")
+                                    else:
+                                        st.caption("💨 No se han podido obtener datos de viento en el foco.")
+                                        if motivo_sin_viento:
+                                            st.caption(f"Motivo técnico: {motivo_sin_viento}")
                                 with gv2:
                                     # temperatura y humedad en el MISMO grafico (dos ejes Y) -
                                     # igual que _grafico_meteo_24h del informe PDF, para poder
