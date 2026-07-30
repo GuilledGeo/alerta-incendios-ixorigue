@@ -853,7 +853,18 @@ with col_panel:
                         f'&nbsp;·&nbsp; {aviso["customer_name"]}'
                         + (f" &nbsp;·&nbsp; 📞 {telefono}" if pd.notna(telefono) and telefono else "")
                     )
-                    with st.expander(etiqueta, expanded=(i == 0)):
+                    # el estado abierto/cerrado del expander se guarda aparte en session_state
+                    # (en vez de fiarse del expanded=(i==0) fijo con el que arranca) porque la
+                    # `etiqueta` de abajo lleva contenido que puede variar de un rerun a otro
+                    # (estado del foco, flecha de ranking...) - sin una key ESTABLE (ranch_id, no
+                    # el texto de la etiqueta) y sin este flag propio, Streamlit puede tratar el
+                    # expander como un componente distinto tras el rerun que dispara cualquier
+                    # boton de dentro (mapa/meteo/PDF) y volver a colapsarlo, obligando a
+                    # reabrirlo a mano justo despues de pulsar el boton que se queria ver
+                    key_expander_abierto = f"expander_abierto_{aviso['ranch_id']}"
+                    if key_expander_abierto not in st.session_state:
+                        st.session_state[key_expander_abierto] = (i == 0)
+                    with st.expander(etiqueta, expanded=st.session_state[key_expander_abierto], key=f"exp_{aviso['ranch_id']}"):
                         col_titulo_aviso, col_boton_foco = st.columns([4, 1.4])
                         with col_titulo_aviso:
                             st.markdown(titulo, unsafe_allow_html=True)
@@ -863,6 +874,7 @@ with col_panel:
                                 help="Centra y hace zoom en el MAPA GRANDE de la izquierda sobre esta finca (no genera nada nuevo, solo mueve la vista).",
                             ):
                                 st.session_state["foco_ranch_id"] = aviso["ranch_id"]
+                                st.session_state[key_expander_abierto] = True
                                 st.rerun()
                         st.write("")
                         c1, c2, c3, c4, c5 = st.columns(5)
@@ -923,6 +935,7 @@ with col_panel:
                                 help="Centra y hace zoom en el MAPA GRANDE de la izquierda sobre esta finca (no genera nada nuevo, solo mueve la vista).",
                             ):
                                 st.session_state["foco_ranch_id"] = aviso["ranch_id"]
+                                st.session_state[key_expander_abierto] = True
                                 st.rerun()
 
                         # el mini-mapa es lo mas caro de este bloque (construye un Folium
@@ -938,17 +951,28 @@ with col_panel:
                             if st.button(
                                 "🔥 Ocultar mapa del incendio" if mostrar_mapa else "🔥 Ver mapa del incendio",
                                 key=f"toggle_mapa_{aviso['ranch_id']}", width="stretch",
-                                help="Genera un mapa APARTE, de cerca, solo de este incendio: anillos de seguridad y focos cercanos a la finca.",
+                                help="Genera un mapa APARTE, de cerca, solo de este incendio: anillos de seguridad y focos cercanos a la finca. También centra el mapa grande de la izquierda sobre esta finca.",
                             ):
                                 st.session_state[key_mapa_visible] = not mostrar_mapa
+                                # centra tambien el mapa general de la izquierda, sin que haga
+                                # falta pulsar aparte "Centrar mapa general" - pedido explicito
+                                # del usuario, misma finca que se esta consultando de cerca
+                                st.session_state["foco_ranch_id"] = aviso["ranch_id"]
+                                st.session_state[key_expander_abierto] = True
                                 st.rerun()
 
                         # meteo: mismos datos (Open-Meteo) que la seccion "Condiciones
                         # meteorologicas" del informe PDF, pero disponibles directamente en la
                         # app sin tener que generar el PDF entero - bajo peticion explicita de
                         # este boton (no automatico al desplegar), igual que el mapa/PDF, para no
-                        # disparar una llamada de red por cada aviso en cada rerun
+                        # disparar una llamada de red por cada aviso en cada rerun. La llamada a
+                        # Open-Meteo se hace UNA VEZ al pulsar el boton (con spinner, dentro del
+                        # propio click) y el resultado se cachea en session_state - sin esto, un
+                        # rerun cualquiera de la pagina (p.ej. otro boton de otra tarjeta) volvia
+                        # a llamar a Open-Meteo cada vez que esta seccion estaba visible, dando
+                        # la sensacion de que "tarda mucho" sin ningun aviso de carga entretanto.
                         key_meteo_visible = f"meteo_visible_{aviso['ranch_id']}"
+                        key_meteo_datos = f"meteo_datos_{aviso['ranch_id']}"
                         if key_meteo_visible not in st.session_state:
                             st.session_state[key_meteo_visible] = False
                         mostrar_meteo = st.session_state[key_meteo_visible]
@@ -958,7 +982,22 @@ with col_panel:
                                 key=f"toggle_meteo_{aviso['ranch_id']}", width="stretch",
                                 help="Viento, temperatura y humedad recientes en la finca (Open-Meteo) - los mismos datos que salen en el informe PDF.",
                             ):
-                                st.session_state[key_meteo_visible] = not mostrar_meteo
+                                nuevo_estado = not mostrar_meteo
+                                if nuevo_estado and key_meteo_datos not in st.session_state:
+                                    with st.spinner("Consultando meteorología..."):
+                                        centroide = rancho_row["geometry"].centroid
+                                        # 72h (no 24h): la precipitacion acumulada que se muestra
+                                        # abajo es a 72h, hace falta pedir esa ventana entera -
+                                        # las graficas de evolucion se quedan con las ultimas 24h
+                                        # de este mismo dataframe, sin pedirlas aparte
+                                        try:
+                                            meteo_72h = obtener_meteo_reciente(centroide.y, centroide.x, horas=72)
+                                            motivo_sin_meteo = None
+                                        except Exception as e:
+                                            meteo_72h, motivo_sin_meteo = None, f"{type(e).__name__}: {e}"
+                                        st.session_state[key_meteo_datos] = (meteo_72h, motivo_sin_meteo)
+                                st.session_state[key_meteo_visible] = nuevo_estado
+                                st.session_state[key_expander_abierto] = True
                                 st.rerun()
 
                         # informe PDF: flujo en 2 pasos (generar -> descargar), igual que el
@@ -974,6 +1013,7 @@ with col_panel:
                                     st.session_state[key_pdf] = generar_pdf_aviso(
                                         rancho_row, aviso, hs_cercanos, hs_mismo_fuego, hs_vista_general,
                                     )
+                                st.session_state[key_expander_abierto] = True
                             if key_pdf in st.session_state:
                                 st.download_button(
                                     "⬇ Descargar informe PDF", data=st.session_state[key_pdf],
@@ -989,23 +1029,25 @@ with col_panel:
                             m_mini = _mapa_mini_aviso(rancho_row, aviso, hs_cercanos)
                             st_folium(m_mini, width=None, height=480, returned_objects=[], key=f"mapa_ranking_{aviso['ranch_id']}")
 
-                        if st.session_state[key_meteo_visible]:
-                            # mismo punto (centroide de la finca) y misma ventana (24h, KPIs
-                            # sobre las ultimas 6h) que usa src/pdf_report.py:generar_pdf_aviso -
-                            # una sola fuente de verdad para "de donde sale la meteo de la finca"
+                        if st.session_state[key_meteo_visible] and key_meteo_datos in st.session_state:
+                            # datos ya obtenidos (y cacheados en session_state) al pulsar el
+                            # boton de arriba - no se vuelve a llamar a Open-Meteo en cada rerun.
+                            # Mismo punto (centroide de la finca) que usa
+                            # src/pdf_report.py:generar_pdf_aviso - una sola fuente de verdad
+                            # para "de donde sale la meteo de la finca" (aunque las ventanas de
+                            # los KPIs de aqui son distintas a las del PDF, a peticion expresa:
+                            # instantaneo en vez de medias donde tiene mas sentido para el lector)
+                            meteo_72h, motivo_sin_meteo = st.session_state[key_meteo_datos]
                             centroide = rancho_row["geometry"].centroid
                             bearing_foco_a_finca = bearing_deg(
                                 aviso["hotspot_lat"], aviso["hotspot_lon"], centroide.y, centroide.x,
                             )
-                            motivo_sin_meteo = None
-                            try:
-                                meteo_24h = obtener_meteo_reciente(centroide.y, centroide.x, horas=24)
-                            except Exception as e:
-                                motivo_sin_meteo = f"{type(e).__name__}: {e}"
-                                meteo_24h = None
-                            hay_meteo = meteo_24h is not None and not meteo_24h.empty
-                            meteo_df = meteo_24h.tail(6).reset_index(drop=True) if hay_meteo else None
-                            viento = interpretar_viento(meteo_df, bearing_foco_a_finca) if hay_meteo else interpretar_viento(None, None)
+                            hay_meteo = meteo_72h is not None and not meteo_72h.empty
+                            # interpretar_viento() sigue trabajando sobre las ultimas 6h (media
+                            # representativa de tendencia reciente) - solo los 4 KPIs de abajo
+                            # cambian a instantaneo/2h/72h
+                            meteo_df_6h = meteo_72h.tail(6).reset_index(drop=True) if hay_meteo else None
+                            viento = interpretar_viento(meteo_df_6h, bearing_foco_a_finca) if hay_meteo else interpretar_viento(None, None)
 
                             st.markdown("**🌤️ Condiciones meteorológicas de la finca**")
                             if viento["frase_velocidad"]:
@@ -1014,19 +1056,35 @@ with col_panel:
                                 st.caption(viento["frase_direccion"])
 
                             if hay_meteo:
+                                temp_ahora = meteo_72h["temp_c"].iloc[-1]
+                                humedad_ahora = meteo_72h["humedad_pct"].iloc[-1]
+                                racha_media_2h = meteo_72h["rafaga_kmh"].tail(2).mean()
+                                precip_72h = meteo_72h["precipitacion_mm"].sum()
+
                                 cm1, cm2, cm3, cm4 = st.columns(4)
-                                cm1.metric(
-                                    "Temp. media (6h)", f"{meteo_df['temp_c'].mean():.0f}°C",
-                                    help=f"Máxima en las últimas 6h: {meteo_df['temp_c'].max():.0f}°C",
-                                )
-                                cm2.metric(
-                                    "Humedad media (6h)", f"{meteo_df['humedad_pct'].mean():.0f}%",
-                                    help=f"Mínima en las últimas 6h: {meteo_df['humedad_pct'].min():.0f}%",
-                                )
-                                cm3.metric("Racha máx. viento (6h)", f"{meteo_df['rafaga_kmh'].max():.0f} km/h")
-                                cm4.metric("Precipitación (6h)", f"{meteo_df['precipitacion_mm'].sum():.1f} mm")
-                                if meteo_df["humedad_pct"].mean() < 30:
-                                    st.caption("La humedad relativa media es baja, lo que favorece la propagación del fuego.")
+                                cm1.metric("Temp. ahora", f"{temp_ahora:.0f}°C")
+                                cm2.metric("Humedad ahora", f"{humedad_ahora:.0f}%")
+                                cm3.metric("Racha viento (2h)", f"{racha_media_2h:.0f} km/h")
+                                cm4.metric("Precipitación (72h)", f"{precip_72h:.1f} mm")
+                                if humedad_ahora < 30:
+                                    st.caption("La humedad relativa es baja, lo que favorece la propagación del fuego.")
+
+                                # graficas de evolucion de las ultimas 24h (subconjunto de las
+                                # 72h ya pedidas para la precipitacion acumulada de arriba, no
+                                # hace falta una llamada aparte) - viento (velocidad + racha),
+                                # temperatura y humedad, cada una con su propia escala/eje
+                                st.caption("Evolución de las últimas 24h:")
+                                grafico_24h = meteo_72h.tail(24).set_index("fecha_hora")
+                                gv1, gv2, gv3 = st.columns(3)
+                                with gv1:
+                                    st.caption("💨 Viento (km/h)")
+                                    st.line_chart(grafico_24h[["velocidad_kmh", "rafaga_kmh"]], height=180)
+                                with gv2:
+                                    st.caption("🌡️ Temperatura (°C)")
+                                    st.line_chart(grafico_24h[["temp_c"]], height=180)
+                                with gv3:
+                                    st.caption("💧 Humedad (%)")
+                                    st.line_chart(grafico_24h[["humedad_pct"]], height=180)
                             else:
                                 st.warning("No se han podido obtener datos meteorológicos recientes para esta zona.")
                                 if motivo_sin_meteo:

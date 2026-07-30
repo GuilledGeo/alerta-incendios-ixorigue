@@ -1,3 +1,4 @@
+import math
 import time
 
 import pandas as pd
@@ -50,7 +51,10 @@ def obtener_meteo_reciente(lat: float, lon: float, horas: int = 6) -> pd.DataFra
                     "latitude": lat,
                     "longitude": lon,
                     "hourly": "winddirection_10m,windspeed_10m,wind_gusts_10m,temperature_2m,relative_humidity_2m,precipitation",
-                    "past_days": 1,
+                    # escalado con `horas` (redondeado a dias enteros, minimo 1) - con past_days
+                    # fijo en 1, pedir horas=72 solo podia devolver como mucho ~24-48h reales
+                    # (desde la medianoche de "ayer" hasta ahora), nunca 72h completas
+                    "past_days": min(max(math.ceil(horas / 24), 1), 92),
                     "forecast_days": 1,
                     "timezone": "Europe/Madrid",
                 },
