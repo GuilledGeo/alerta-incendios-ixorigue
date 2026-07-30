@@ -68,7 +68,7 @@ from src.firms_api import obtener_hotspots_firms_api
 from src.gee_hotspots import obtener_hotspots_gee
 from src.geo_utils import bearing_deg
 from src.interpretacion import interpretar_viento
-from src.pdf_report import generar_pdf_aviso
+from src.pdf_report import _grafico_viento, generar_pdf_aviso
 from src.ranches import obtener_ranchos_es, obtener_zonas_es
 from src.rank_history import calcular_cambios_ranking
 from src.risk import anillos_riesgo, bbox_vista_general, estado_foco, evaluar_riesgo
@@ -1042,6 +1042,12 @@ with col_panel:
                             bearing_foco_a_finca = bearing_deg(
                                 aviso["hotspot_lat"], aviso["hotspot_lon"], centroide.y, centroide.x,
                             )
+                            # rumbo inverso (desde la finca hacia el foco) - para marcar con una
+                            # estrella en el radar de viento donde esta el foco activo, igual
+                            # que en el informe PDF
+                            bearing_finca_a_foco = bearing_deg(
+                                centroide.y, centroide.x, aviso["hotspot_lat"], aviso["hotspot_lon"],
+                            )
                             hay_meteo = meteo_72h is not None and not meteo_72h.empty
                             # interpretar_viento() sigue trabajando sobre las ultimas 6h (media
                             # representativa de tendencia reciente) - solo los 4 KPIs de abajo
@@ -1077,8 +1083,13 @@ with col_panel:
                                 grafico_24h = meteo_72h.tail(24).set_index("fecha_hora")
                                 gv1, gv2, gv3 = st.columns(3)
                                 with gv1:
-                                    st.caption("💨 Viento (km/h)")
-                                    st.line_chart(grafico_24h[["velocidad_kmh", "rafaga_kmh"]], height=180)
+                                    # radar/brujula de viento "modo sonar" - mismo grafico que el
+                                    # informe PDF (reutilizado tal cual, no una version distinta):
+                                    # un punto por hora reciente en la direccion hacia la que
+                                    # sopla el viento, linea roja = rumbo hacia la finca, estrella
+                                    # = donde esta el foco activo respecto a la finca
+                                    imagen_viento = _grafico_viento(meteo_df_6h, bearing_foco_a_finca, bearing_finca_a_foco)
+                                    st.image(imagen_viento, width="stretch")
                                 with gv2:
                                     st.caption("🌡️ Temperatura (°C)")
                                     st.line_chart(grafico_24h[["temp_c"]], height=180)
