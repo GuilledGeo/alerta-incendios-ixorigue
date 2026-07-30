@@ -27,6 +27,7 @@ except ImportError:
 import folium
 import geopandas as gpd
 import pandas as pd
+import plotly.graph_objects as go
 import streamlit as st
 from folium.plugins import MeasureControl
 from shapely.geometry import Point
@@ -68,7 +69,7 @@ from src.firms_api import obtener_hotspots_firms_api
 from src.gee_hotspots import obtener_hotspots_gee
 from src.geo_utils import bearing_deg
 from src.interpretacion import interpretar_viento
-from src.pdf_report import _grafico_viento, generar_pdf_aviso
+from src.pdf_report import generar_pdf_aviso
 from src.ranches import obtener_ranchos_es, obtener_zonas_es
 from src.rank_history import calcular_cambios_ranking
 from src.risk import anillos_riesgo, bbox_vista_general, estado_foco, evaluar_riesgo
@@ -334,6 +335,59 @@ def _badge_cambio_ranking_html(cambio) -> str:
         # suene a positivo en otros contextos) - y bajar puestos = menos peligro = verde
         return f'<span class="ix-badge" style="background-color:#dc2626">🔼 {delta}</span>'
     return f'<span class="ix-badge" style="background-color:#16a34a">🔽 {delta}</span>'
+
+
+def _grafico_viento_interactivo(meteo_df: pd.DataFrame, bearing_foco_a_finca, bearing_finca_a_foco) -> go.Figure:
+    """Version interactiva (Plotly, zoom/hover) del radar de viento "modo sonar" del informe PDF
+    (src/pdf_report.py:_grafico_viento, que genera una imagen PNG estatica con matplotlib - no
+    sirve aqui porque en la app se quiere poder pasar el raton sobre cada punto). Mismo diseño:
+    un punto por hora reciente en la direccion hacia la que SOPLA el viento (no de donde viene),
+    a una distancia del centro proporcional a la velocidad - mas oscuro y grande cuanto mas
+    reciente. La linea roja marca el rumbo desde el foco hacia la finca (centro del grafico);
+    la estrella naranja marca en que direccion esta el foco activo respecto a la finca."""
+    n = len(meteo_df)
+    direccion_sopla = (meteo_df["direccion_grados"] + 180) % 360
+    intensidades = [0.3 + 0.6 * (i / max(n - 1, 1)) for i in range(n)]
+    tamanos = [14 + 20 * (i / max(n - 1, 1)) for i in range(n)]
+    horas_txt = meteo_df["fecha_hora"].dt.strftime("%H:%M")
+    vmax = max(meteo_df["velocidad_kmh"].max(), 1) * 1.25
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatterpolar(
+        r=meteo_df["velocidad_kmh"], theta=direccion_sopla, mode="markers+text",
+        marker=dict(size=tamanos, color=intensidades, colorscale="Blues", cmin=0, cmax=1,
+                    line=dict(color="#1e3a5f", width=1)),
+        text=horas_txt, textposition="top center", textfont=dict(size=9),
+        customdata=horas_txt,
+        hovertemplate="%{customdata} · %{r:.0f} km/h<extra></extra>",
+        name="Viento (hacia donde sopla)", showlegend=False,
+    ))
+    if bearing_foco_a_finca is not None:
+        fig.add_trace(go.Scatterpolar(
+            r=[0, vmax], theta=[bearing_foco_a_finca, bearing_foco_a_finca], mode="lines",
+            line=dict(color="#dc2626", width=2.5, dash="dash"), name="Rumbo hacia su finca",
+            hoverinfo="skip", showlegend=False,
+        ))
+    if bearing_finca_a_foco is not None:
+        fig.add_trace(go.Scatterpolar(
+            r=[vmax * 0.55], theta=[bearing_finca_a_foco], mode="markers+text",
+            marker=dict(symbol="star", size=16, color="#f97316", line=dict(color="black", width=1)),
+            text=["Foco activo"], textposition="top center", textfont=dict(size=9, color="#f97316"),
+            name="Foco activo", hoverinfo="skip", showlegend=False,
+        ))
+    fig.update_layout(
+        polar=dict(
+            radialaxis=dict(range=[0, vmax], ticksuffix=" km/h", showline=False),
+            angularaxis=dict(
+                direction="clockwise", rotation=90,
+                tickmode="array", tickvals=[0, 45, 90, 135, 180, 225, 270, 315],
+                ticktext=["N", "NE", "E", "SE", "S", "SO", "O", "NO"],
+            ),
+        ),
+        title=dict(text="💨 Radar de viento — hacia dónde sopla", font=dict(size=13)),
+        margin=dict(t=40, b=10, l=20, r=20), height=340,
+    )
+    return fig
 
 
 def _color_por_antiguedad(acq_datetime) -> tuple[str, str]:
@@ -1083,13 +1137,12 @@ with col_panel:
                                 grafico_24h = meteo_72h.tail(24).set_index("fecha_hora")
                                 gv1, gv2, gv3 = st.columns(3)
                                 with gv1:
-                                    # radar/brujula de viento "modo sonar" - mismo grafico que el
-                                    # informe PDF (reutilizado tal cual, no una version distinta):
-                                    # un punto por hora reciente en la direccion hacia la que
-                                    # sopla el viento, linea roja = rumbo hacia la finca, estrella
-                                    # = donde esta el foco activo respecto a la finca
-                                    imagen_viento = _grafico_viento(meteo_df_6h, bearing_foco_a_finca, bearing_finca_a_foco)
-                                    st.image(imagen_viento, width="stretch")
+                                    # radar/brujula de viento interactivo (Plotly, con zoom/hover
+                                    # al pasar el raton) - a diferencia del informe PDF, que usa
+                                    # una imagen PNG estatica (matplotlib), aqui se puede
+                                    # interactuar igual que con las graficas de linea de al lado
+                                    fig_viento = _grafico_viento_interactivo(meteo_df_6h, bearing_foco_a_finca, bearing_finca_a_foco)
+                                    st.plotly_chart(fig_viento, width="stretch", key=f"viento_radar_{aviso['ranch_id']}")
                                 with gv2:
                                     st.caption("🌡️ Temperatura (°C)")
                                     st.line_chart(grafico_24h[["temp_c"]], height=180)

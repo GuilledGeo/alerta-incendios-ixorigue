@@ -13,3 +13,4 @@ matplotlib
 reportlab
 contextily
 gspread
+plotly
