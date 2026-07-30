@@ -50,7 +50,8 @@ from .fires import formatear_hace
 from .geo_utils import bearing_deg
 from .interpretacion import detectar_rodeado, interpretar_riesgo, interpretar_viento
 from .risk import (
-    ESTADO_FOCO_ACTIVO_H, ESTADO_FOCO_CONTROLADO_H, MAPA_GENERAL_ASPECT, anillos_riesgo, estado_foco,
+    ESTADO_FOCO_ACTIVO_H, ESTADO_FOCO_CONTROLADO_H, ESTADO_FOCO_RECIENTE_H,
+    MAPA_GENERAL_ASPECT, anillos_riesgo, estado_foco,
 )
 from .weather import obtener_meteo_reciente
 
@@ -660,19 +661,21 @@ def generar_pdf_aviso(
         textColor=rl_colors.white, fontName="Helvetica-Bold", alignment=1, spaceAfter=0,
     )
     badges_estado = [
-        ("Activo", f"detectado hace &lt;{ESTADO_FOCO_ACTIVO_H}h", "#ef4444"),
+        ("Reciente", f"detectado hace &lt;{ESTADO_FOCO_RECIENTE_H}h", "#a21caf"),
+        ("Activo", f"{ESTADO_FOCO_RECIENTE_H}-{ESTADO_FOCO_ACTIVO_H}h sin nueva detección", "#ef4444"),
         ("En seguimiento", f"{ESTADO_FOCO_ACTIVO_H}-{ESTADO_FOCO_CONTROLADO_H}h sin detección", "#eab308"),
         ("Controlado / extinto", f"&gt;{ESTADO_FOCO_CONTROLADO_H}h sin detección", "#22c55e"),
     ]
     tabla_estado = Table(
         [[Paragraph(f"{nombre}<br/><font size=6.5>{detalle}</font>", estilo_leyenda_estado)
           for nombre, detalle, _ in badges_estado]],
-        colWidths=[doc.width / 3] * 3,
+        colWidths=[doc.width / 4] * 4,
     )
     tabla_estado.setStyle(TableStyle([
         ("BACKGROUND", (0, 0), (0, 0), rl_colors.HexColor(badges_estado[0][2])),
         ("BACKGROUND", (1, 0), (1, 0), rl_colors.HexColor(badges_estado[1][2])),
         ("BACKGROUND", (2, 0), (2, 0), rl_colors.HexColor(badges_estado[2][2])),
+        ("BACKGROUND", (3, 0), (3, 0), rl_colors.HexColor(badges_estado[3][2])),
         ("TOPPADDING", (0, 0), (-1, -1), 6),
         ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
         ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),

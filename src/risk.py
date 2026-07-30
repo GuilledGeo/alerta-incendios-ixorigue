@@ -24,24 +24,31 @@ _GEOD = Geod(ellps="WGS84")
 # que siguen activos de los que probablemente ya estan controlados/extinguidos - compartido
 # entre app.py (badge del ranking) y src/pdf_report.py (informe PDF).
 #
-# 24h/48h: deliberadamente los MISMOS cortes que ya usa la leyenda de antiguedad de los hotspots
-# en el mapa (config.HOTSPOT_AGE_BINS_H = [6, 12, 24, 48, 72] - un punto pasa de naranja
-# "12-24h" a amarillo "24-48h" justo en las 24h, y de amarillo a verde "48-72h" justo en las
-# 48h). Antes este modulo tenia su propia escala independiente (24h/36h, luego 12h/24h en un
-# primer intento) que no coincidia con ninguno de esos cortes del mapa - resultaba en que el
-# color del punto y el estado del foco cambiaban en momentos distintos sin motivo, confuso para
-# quien mira ambos a la vez. Usar los mismos cortes que el mapa es lo que de verdad da
-# coherencia, no un numero concreto en si mismo.
+# 6h/24h/48h: deliberadamente los MISMOS cortes que ya usa la leyenda de antiguedad de los
+# hotspots en el mapa (config.HOTSPOT_AGE_BINS_H = [6, 12, 24, 48, 72] - un punto pasa de
+# morado "≤6h" a rojo "6-12h" justo en las 6h, de naranja "12-24h" a amarillo "24-48h" justo en
+# las 24h, y de amarillo a verde "48-72h" justo en las 48h). Antes este modulo tenia su propia
+# escala independiente (24h/36h, luego 12h/24h en un primer intento) que no coincidia con
+# ninguno de esos cortes del mapa - resultaba en que el color del punto y el estado del foco
+# cambiaban en momentos distintos sin motivo, confuso para quien mira ambos a la vez. Usar los
+# mismos cortes que el mapa es lo que de verdad da coherencia, no un numero concreto en si
+# mismo. "Reciente" (<6h, morado) se añadio el 29-jul-2026 para distinguir, dentro de los focos
+# activos, los detectados en la ultima pasada satelital de los que ya llevan varias horas
+# activos sin una detección más nueva.
+ESTADO_FOCO_RECIENTE_H = 6
 ESTADO_FOCO_ACTIVO_H = 24
 ESTADO_FOCO_CONTROLADO_H = 48
 
 
 def estado_foco(ultima_deteccion) -> tuple[str, str, str]:
     """(emoji+label, color, texto corto) segun antiguedad de la ultima deteccion del foco:
-    <24h = activo, 24-48h = en seguimiento (zona gris entre ambos umbrales), >=48h = controlado."""
+    <6h = reciente (morado, la deteccion mas fresca posible), 6-24h = activo, 24-48h = en
+    seguimiento (zona gris entre ambos umbrales), >=48h = controlado."""
     if pd.isna(ultima_deteccion):
         return "", "#6b7280", ""
     horas = (pd.Timestamp.now(tz="UTC") - ultima_deteccion).total_seconds() / 3600.0
+    if horas < ESTADO_FOCO_RECIENTE_H:
+        return "🟣 Foco reciente", "#a21caf", "Reciente"
     if horas < ESTADO_FOCO_ACTIVO_H:
         return "🔥 Foco activo", "#ef4444", "Activo"
     if horas >= ESTADO_FOCO_CONTROLADO_H:

@@ -66,10 +66,13 @@ except Exception:
 from src.fires import calcular_avance, excluir_paises, formatear_duracion, geocodificar_incendios, identificar_incendios
 from src.firms_api import obtener_hotspots_firms_api
 from src.gee_hotspots import obtener_hotspots_gee
+from src.geo_utils import bearing_deg
+from src.interpretacion import interpretar_viento
 from src.pdf_report import generar_pdf_aviso
 from src.ranches import obtener_ranchos_es, obtener_zonas_es
 from src.rank_history import calcular_cambios_ranking
 from src.risk import anillos_riesgo, bbox_vista_general, estado_foco, evaluar_riesgo
+from src.weather import obtener_meteo_reciente
 
 st.set_page_config(page_title="Alerta de incendios — Ixorigue", layout="wide", page_icon="🔥", initial_sidebar_state="collapsed")
 
@@ -100,12 +103,12 @@ ORDEN_RIESGO = {"3/3": 0, "2/3": 1, "1/3": 2}
 # directa, <3h de latencia - ver src/firms_api.py) ya se puede distinguir de verdad un foco
 # "Activo" ahora mismo de uno "Controlado" (ver umbrales en src/risk.py), asi que dentro del
 # mismo nivel de riesgo interesa ver antes el que sigue activo, no solo el mas cercano
-ORDEN_URGENCIA = {"Activo": 0, "En seguimiento": 1, "Controlado": 2}
+ORDEN_URGENCIA = {"Reciente": 0, "Activo": 1, "En seguimiento": 2, "Controlado": 3}
 
 
 def _orden_urgencia(ultima_deteccion) -> int:
     _, _, estado_texto = estado_foco(ultima_deteccion)
-    return ORDEN_URGENCIA.get(estado_texto, 3)
+    return ORDEN_URGENCIA.get(estado_texto, 4)
 
 # ============================== ESTILO ==============================
 
@@ -903,7 +906,7 @@ with col_panel:
                         rancho_row = ranchos.loc[ranchos["ranch_id"] == aviso["ranch_id"]].iloc[0]
                         hs_cercanos = _hotspots_cercanos_de(rancho_row, hotspots)
 
-                        col_centrar_btn, col_mapa_btn, col_pdf_btn = st.columns(3)
+                        col_centrar_btn, col_mapa_btn, col_meteo_btn, col_pdf_btn = st.columns(4)
 
                         # mismo mecanismo que el boton "🔎 Centrar mapa general" de la cabecera
                         # del aviso (session_state["foco_ranch_id"]) - se repite aqui, junto al
@@ -940,6 +943,24 @@ with col_panel:
                                 st.session_state[key_mapa_visible] = not mostrar_mapa
                                 st.rerun()
 
+                        # meteo: mismos datos (Open-Meteo) que la seccion "Condiciones
+                        # meteorologicas" del informe PDF, pero disponibles directamente en la
+                        # app sin tener que generar el PDF entero - bajo peticion explicita de
+                        # este boton (no automatico al desplegar), igual que el mapa/PDF, para no
+                        # disparar una llamada de red por cada aviso en cada rerun
+                        key_meteo_visible = f"meteo_visible_{aviso['ranch_id']}"
+                        if key_meteo_visible not in st.session_state:
+                            st.session_state[key_meteo_visible] = False
+                        mostrar_meteo = st.session_state[key_meteo_visible]
+                        with col_meteo_btn:
+                            if st.button(
+                                "🌤️ Ocultar meteorología" if mostrar_meteo else "🌤️ Ver meteorología",
+                                key=f"toggle_meteo_{aviso['ranch_id']}", width="stretch",
+                                help="Viento, temperatura y humedad recientes en la finca (Open-Meteo) - los mismos datos que salen en el informe PDF.",
+                            ):
+                                st.session_state[key_meteo_visible] = not mostrar_meteo
+                                st.rerun()
+
                         # informe PDF: flujo en 2 pasos (generar -> descargar), igual que el
                         # mapa, para no reconstruirlo en cada rerun mientras el aviso esta
                         # desplegado - genera llamadas de red propias (Open-Meteo + teselas de
@@ -968,6 +989,49 @@ with col_panel:
                             m_mini = _mapa_mini_aviso(rancho_row, aviso, hs_cercanos)
                             st_folium(m_mini, width=None, height=480, returned_objects=[], key=f"mapa_ranking_{aviso['ranch_id']}")
 
+                        if st.session_state[key_meteo_visible]:
+                            # mismo punto (centroide de la finca) y misma ventana (24h, KPIs
+                            # sobre las ultimas 6h) que usa src/pdf_report.py:generar_pdf_aviso -
+                            # una sola fuente de verdad para "de donde sale la meteo de la finca"
+                            centroide = rancho_row["geometry"].centroid
+                            bearing_foco_a_finca = bearing_deg(
+                                aviso["hotspot_lat"], aviso["hotspot_lon"], centroide.y, centroide.x,
+                            )
+                            motivo_sin_meteo = None
+                            try:
+                                meteo_24h = obtener_meteo_reciente(centroide.y, centroide.x, horas=24)
+                            except Exception as e:
+                                motivo_sin_meteo = f"{type(e).__name__}: {e}"
+                                meteo_24h = None
+                            hay_meteo = meteo_24h is not None and not meteo_24h.empty
+                            meteo_df = meteo_24h.tail(6).reset_index(drop=True) if hay_meteo else None
+                            viento = interpretar_viento(meteo_df, bearing_foco_a_finca) if hay_meteo else interpretar_viento(None, None)
+
+                            st.markdown("**🌤️ Condiciones meteorológicas de la finca**")
+                            if viento["frase_velocidad"]:
+                                st.markdown(f"**{viento['frase_velocidad']}**")
+                            if viento["frase_direccion"]:
+                                st.caption(viento["frase_direccion"])
+
+                            if hay_meteo:
+                                cm1, cm2, cm3, cm4 = st.columns(4)
+                                cm1.metric(
+                                    "Temp. media (6h)", f"{meteo_df['temp_c'].mean():.0f}°C",
+                                    help=f"Máxima en las últimas 6h: {meteo_df['temp_c'].max():.0f}°C",
+                                )
+                                cm2.metric(
+                                    "Humedad media (6h)", f"{meteo_df['humedad_pct'].mean():.0f}%",
+                                    help=f"Mínima en las últimas 6h: {meteo_df['humedad_pct'].min():.0f}%",
+                                )
+                                cm3.metric("Racha máx. viento (6h)", f"{meteo_df['rafaga_kmh'].max():.0f} km/h")
+                                cm4.metric("Precipitación (6h)", f"{meteo_df['precipitacion_mm'].sum():.1f} mm")
+                                if meteo_df["humedad_pct"].mean() < 30:
+                                    st.caption("La humedad relativa media es baja, lo que favorece la propagación del fuego.")
+                            else:
+                                st.warning("No se han podido obtener datos meteorológicos recientes para esta zona.")
+                                if motivo_sin_meteo:
+                                    st.caption(f"Motivo técnico: {motivo_sin_meteo}")
+
     # ---- LISTA DE GANADERIAS EN RIESGO (mismas que el ranking) ----
     with tab_lista:
         with st.container(height=PANEL_HEIGHT, border=False):
@@ -992,7 +1056,7 @@ with col_panel:
                     "acq_datetime": "Detección (UTC)",
                 })
                 tabla_lista["_orden"] = tabla_lista["Riesgo"].map(ORDEN_RIESGO)
-                tabla_lista["_urgencia"] = tabla_lista["Estado"].map(ORDEN_URGENCIA).fillna(3)
+                tabla_lista["_urgencia"] = tabla_lista["Estado"].map(ORDEN_URGENCIA).fillna(4)
                 tabla_lista = tabla_lista.sort_values(
                     ["_orden", "_urgencia", "Distancia (km)"]
                 ).drop(columns=["_orden", "_urgencia"])
