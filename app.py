@@ -1,3 +1,4 @@
+import math
 import os
 import sys
 from datetime import datetime, timezone
@@ -348,43 +349,70 @@ def _grafico_viento_interactivo(meteo_df: pd.DataFrame, bearing_foco_a_finca, be
     n = len(meteo_df)
     direccion_sopla = (meteo_df["direccion_grados"] + 180) % 360
     intensidades = [0.3 + 0.6 * (i / max(n - 1, 1)) for i in range(n)]
-    tamanos = [14 + 20 * (i / max(n - 1, 1)) for i in range(n)]
+    tamanos = [16 + 20 * (i / max(n - 1, 1)) for i in range(n)]
     horas_txt = meteo_df["fecha_hora"].dt.strftime("%H:%M")
-    vmax = max(meteo_df["velocidad_kmh"].max(), 1) * 1.25
+    # vmax_datos = hasta donde llegan de verdad los puntos/la linea de rumbo; vmax_eje = rango
+    # del propio eje, con margen extra por encima para que el texto "Su finca"/"Foco activo" no
+    # quede pegado (y recortado) justo en el borde del grafico, como pasaba antes
+    vmax_datos = max(meteo_df["velocidad_kmh"].max(), 1) * 1.25
+    vmax_eje = vmax_datos * 1.22
+    COLOR_TEXTO = "#e5e7eb"
+    COLOR_REJILLA = "rgba(255,255,255,0.18)"
 
     fig = go.Figure()
     fig.add_trace(go.Scatterpolar(
         r=meteo_df["velocidad_kmh"], theta=direccion_sopla, mode="markers+text",
         marker=dict(size=tamanos, color=intensidades, colorscale="Blues", cmin=0, cmax=1,
-                    line=dict(color="#1e3a5f", width=1)),
-        text=horas_txt, textposition="top center", textfont=dict(size=9),
+                    line=dict(color="white", width=1.2)),
+        text=horas_txt, textposition="top center", textfont=dict(size=10, color=COLOR_TEXTO),
         customdata=horas_txt,
         hovertemplate="%{customdata} · %{r:.0f} km/h<extra></extra>",
         name="Viento (hacia donde sopla)", showlegend=False,
     ))
     if bearing_foco_a_finca is not None:
         fig.add_trace(go.Scatterpolar(
-            r=[0, vmax], theta=[bearing_foco_a_finca, bearing_foco_a_finca], mode="lines",
-            line=dict(color="#dc2626", width=2.5, dash="dash"), name="Rumbo hacia su finca",
+            r=[0, vmax_datos], theta=[bearing_foco_a_finca, bearing_foco_a_finca], mode="lines",
+            line=dict(color="#ef4444", width=2.5, dash="dash"), name="Rumbo hacia su finca",
             hoverinfo="skip", showlegend=False,
         ))
+        fig.add_annotation(
+            text="Su finca", showarrow=False, font=dict(size=11, color="#ef4444"),
+            x=0.5 + 0.47 * math.sin(math.radians(bearing_foco_a_finca)),
+            y=0.5 + 0.47 * math.cos(math.radians(bearing_foco_a_finca)),
+            xref="paper", yref="paper",
+        )
     if bearing_finca_a_foco is not None:
         fig.add_trace(go.Scatterpolar(
-            r=[vmax * 0.55], theta=[bearing_finca_a_foco], mode="markers+text",
-            marker=dict(symbol="star", size=16, color="#f97316", line=dict(color="black", width=1)),
-            text=["Foco activo"], textposition="top center", textfont=dict(size=9, color="#f97316"),
+            r=[vmax_datos * 0.55], theta=[bearing_finca_a_foco], mode="markers",
+            marker=dict(symbol="star", size=18, color="#f97316", line=dict(color="white", width=1)),
             name="Foco activo", hoverinfo="skip", showlegend=False,
         ))
+        # etiqueta desplazada RADIALMENTE (misma direccion angular que la estrella, mas lejos
+        # del centro) en vez de con un offset vertical fijo - un offset fijo quedaba bien en
+        # algunos angulos pero se solapaba con la propia estrella en otros
+        fig.add_annotation(
+            text="Foco activo", showarrow=False, font=dict(size=11, color="#f97316"),
+            x=0.5 + 0.46 * math.sin(math.radians(bearing_finca_a_foco)),
+            y=0.5 + 0.46 * math.cos(math.radians(bearing_finca_a_foco)),
+            xref="paper", yref="paper",
+        )
     fig.update_layout(
+        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
         polar=dict(
-            radialaxis=dict(range=[0, vmax], ticksuffix=" km/h", showline=False),
+            bgcolor="rgba(0,0,0,0)",
+            radialaxis=dict(
+                range=[0, vmax_eje], ticksuffix=" km/h", showline=False,
+                gridcolor=COLOR_REJILLA, tickfont=dict(color=COLOR_TEXTO, size=9),
+            ),
             angularaxis=dict(
                 direction="clockwise", rotation=90,
                 tickmode="array", tickvals=[0, 45, 90, 135, 180, 225, 270, 315],
                 ticktext=["N", "NE", "E", "SE", "S", "SO", "O", "NO"],
+                gridcolor=COLOR_REJILLA, linecolor=COLOR_REJILLA,
+                tickfont=dict(color=COLOR_TEXTO, size=11),
             ),
         ),
-        title=dict(text="💨 Radar de viento — hacia dónde sopla", font=dict(size=13)),
+        title=dict(text="💨 Radar de viento — hacia dónde sopla", font=dict(size=13, color=COLOR_TEXTO)),
         margin=dict(t=40, b=10, l=20, r=20), height=340,
     )
     return fig
