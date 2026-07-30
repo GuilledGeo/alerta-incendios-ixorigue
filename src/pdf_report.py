@@ -762,6 +762,12 @@ def generar_pdf_aviso(
         story.append(Paragraph(f"<b>{viento['frase_velocidad']}</b>", estilo_destacado))
     if viento["frase_direccion"]:
         story.append(Paragraph(f"<i>{viento['frase_direccion']}</i>", estilo_matiz))
+    if hay_viento:
+        story.append(Paragraph(
+            "<i>Velocidad y dirección del viento medidas en la ubicación del foco más cercano, "
+            "no en la finca — el viento puede soplar en otra dirección en la finca por el "
+            "terreno o el microclima local.</i>", estilo_matiz,
+        ))
 
     if hay_meteo:
         temp_media, temp_max = meteo_df["temp_c"].mean(), meteo_df["temp_c"].max()

@@ -1198,6 +1198,12 @@ with col_panel:
                                 st.markdown(f"**{viento['frase_velocidad']}**")
                             if viento["frase_direccion"]:
                                 st.caption(viento["frase_direccion"])
+                            if hay_viento:
+                                st.caption(
+                                    "📍 Velocidad y dirección del viento medidas en la ubicación del foco "
+                                    "más cercano, no en la finca — el viento puede soplar en otra dirección "
+                                    "en la finca por el terreno o el microclima local."
+                                )
 
                             if hay_meteo:
                                 temp_ahora = meteo_72h["temp_c"].iloc[-1]
