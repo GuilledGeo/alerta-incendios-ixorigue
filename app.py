@@ -413,7 +413,44 @@ def _grafico_viento_interactivo(meteo_df: pd.DataFrame, bearing_foco_a_finca, be
             ),
         ),
         title=dict(text="💨 Radar de viento — hacia dónde sopla", font=dict(size=13, color=COLOR_TEXTO)),
-        margin=dict(t=40, b=10, l=20, r=20), height=340,
+        margin=dict(t=60, b=10, l=20, r=20), height=340,
+    )
+    return fig
+
+
+def _grafico_temp_humedad_interactivo(meteo_df: pd.DataFrame) -> go.Figure:
+    """Temperatura y humedad relativa de las ultimas 24h en el MISMO grafico (dos ejes Y, uno
+    por serie) - igual que src/pdf_report.py:_grafico_meteo_24h, version interactiva con Plotly
+    en vez de imagen PNG estatica. Un solo grafico en vez de dos separados deja ver de un
+    vistazo si ambas magnitudes suben/bajan juntas o en direcciones opuestas (lo habitual:
+    humedad baja cuando sube la temperatura)."""
+    horas_txt = meteo_df["fecha_hora"].dt.strftime("%H:%M")
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=horas_txt, y=meteo_df["temp_c"], mode="lines+markers", name="Temperatura (°C)",
+        line=dict(color="#ef4444", width=2.2), marker=dict(size=5),
+        hovertemplate="%{x} · %{y:.0f}°C<extra></extra>", yaxis="y1",
+    ))
+    fig.add_trace(go.Scatter(
+        x=horas_txt, y=meteo_df["humedad_pct"], mode="lines+markers", name="Humedad (%)",
+        line=dict(color="#3b82f6", width=2.2), marker=dict(size=5),
+        hovertemplate="%{x} · %{y:.0f}%<extra></extra>", yaxis="y2",
+    ))
+    COLOR_TEXTO = "#e5e7eb"
+    fig.update_layout(
+        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+        title=dict(text="🌡️💧 Temperatura y humedad — últimas 24h", font=dict(size=13, color=COLOR_TEXTO)),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0, font=dict(color=COLOR_TEXTO)),
+        xaxis=dict(tickfont=dict(color=COLOR_TEXTO, size=9), gridcolor="rgba(255,255,255,0.1)"),
+        yaxis=dict(
+            title=dict(text="°C", font=dict(color="#ef4444")), tickfont=dict(color="#ef4444"),
+            gridcolor="rgba(255,255,255,0.1)",
+        ),
+        yaxis2=dict(
+            title=dict(text="%", font=dict(color="#3b82f6")), tickfont=dict(color="#3b82f6"),
+            overlaying="y", side="right", showgrid=False,
+        ),
+        margin=dict(t=60, b=10, l=10, r=10), height=340,
     )
     return fig
 
@@ -1159,11 +1196,11 @@ with col_panel:
 
                                 # graficas de evolucion de las ultimas 24h (subconjunto de las
                                 # 72h ya pedidas para la precipitacion acumulada de arriba, no
-                                # hace falta una llamada aparte) - viento (velocidad + racha),
-                                # temperatura y humedad, cada una con su propia escala/eje
+                                # hace falta una llamada aparte) - viento (radar) y temperatura+
+                                # humedad juntas en un solo grafico de dos ejes
                                 st.caption("Evolución de las últimas 24h:")
-                                grafico_24h = meteo_72h.tail(24).set_index("fecha_hora")
-                                gv1, gv2, gv3 = st.columns(3)
+                                grafico_24h = meteo_72h.tail(24)
+                                gv1, gv2 = st.columns(2, gap="large")
                                 with gv1:
                                     # radar/brujula de viento interactivo (Plotly, con zoom/hover
                                     # al pasar el raton) - a diferencia del informe PDF, que usa
@@ -1172,11 +1209,11 @@ with col_panel:
                                     fig_viento = _grafico_viento_interactivo(meteo_df_6h, bearing_foco_a_finca, bearing_finca_a_foco)
                                     st.plotly_chart(fig_viento, width="stretch", key=f"viento_radar_{aviso['ranch_id']}")
                                 with gv2:
-                                    st.caption("🌡️ Temperatura (°C)")
-                                    st.line_chart(grafico_24h[["temp_c"]], height=180)
-                                with gv3:
-                                    st.caption("💧 Humedad (%)")
-                                    st.line_chart(grafico_24h[["humedad_pct"]], height=180)
+                                    # temperatura y humedad en el MISMO grafico (dos ejes Y) -
+                                    # igual que _grafico_meteo_24h del informe PDF, para poder
+                                    # comparar de un vistazo si suben/bajan juntas o al reves
+                                    fig_temp_hum = _grafico_temp_humedad_interactivo(grafico_24h)
+                                    st.plotly_chart(fig_temp_hum, width="stretch", key=f"temp_hum_{aviso['ranch_id']}")
                             else:
                                 st.warning("No se han podido obtener datos meteorológicos recientes para esta zona.")
                                 if motivo_sin_meteo:
