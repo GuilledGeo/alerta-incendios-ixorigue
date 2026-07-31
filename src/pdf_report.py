@@ -613,7 +613,7 @@ def generar_pdf_aviso(
         ("ALIGN", (0, 0), (-1, -1), "CENTER"),
     ]))
     story.append(banner)
-    story.append(Spacer(1, 0.3 * cm))
+    story.append(Spacer(1, 0.2 * cm))
 
     telefono = aviso_row.get("customer_phone")
     linea_cliente = f"<b>{aviso_row['ranch_name']}</b>"
@@ -646,6 +646,12 @@ def generar_pdf_aviso(
     story.append(Spacer(1, 0.25 * cm))
 
     zonas = rancho_row.get("zonas_nombres") or rancho_row.get("zona_nombre") or "—"
+    # fincas con muchas parcelas pequeñas pueden listar 20+ zonas, ocupando varias lineas y
+    # empujando el mapa de "Situación" (ver mas abajo) a la pagina 2 - se acorta a las primeras
+    # 4 con un "y N más", que ya deja claro que la finca esta subdividida sin ocupar tanto sitio
+    zonas_lista = [z.strip() for z in zonas.split(",") if z.strip()] if zonas != "—" else []
+    if len(zonas_lista) > 4:
+        zonas = f"{', '.join(zonas_lista[:4])} y {len(zonas_lista) - 4} más"
     tipo = rancho_row.get("tipo_ganaderia") or "—"
     region = rancho_row.get("region") or "—"
     story.append(Paragraph(
@@ -721,7 +727,7 @@ def generar_pdf_aviso(
         # que, junto con el resto del contenido de encima, quepa entero en la pagina 1.
         ancho_mapa_general = min(doc.width - 1 * cm, 15.5 * cm)
         imagen_general_flow = Image(
-            imagen_mapa_general, width=ancho_mapa_general, height=9.2 * cm, kind="proportional",
+            imagen_mapa_general, width=ancho_mapa_general, height=8.4 * cm, kind="proportional",
         )
         imagen_general_flow.hAlign = "CENTER"
         story.append(KeepTogether([
